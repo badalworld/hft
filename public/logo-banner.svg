@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 320" fill="none">
+  <defs>
+    <linearGradient id="cardBg" x1="0" y1="0" x2="960" y2="320" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3a211f" />
+      <stop offset="50%" stop-color="#201110" />
+      <stop offset="100%" stop-color="#130a09" />
+    </linearGradient>
+    <linearGradient id="metalSilver" x1="0" y1="54" x2="0" y2="176" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="45%" stop-color="#E4EAF2" />
+      <stop offset="100%" stop-color="#8A97AA" />
+    </linearGradient>
+    <linearGradient id="bullCandle" x1="0" y1="24" x2="0" y2="195" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#84FF57" />
+      <stop offset="45%" stop-color="#2CE06B" />
+      <stop offset="100%" stop-color="#0B8A52" />
+    </linearGradient>
+    <linearGradient id="lotusTop" x1="0" y1="0" x2="960" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ADEBB3" />
+      <stop offset="33%" stop-color="#FF857A" />
+      <stop offset="66%" stop-color="#EBAEE6" />
+      <stop offset="100%" stop-color="#6B403C" />
+    </linearGradient>
+    <filter id="candleGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="5" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Luxury Skeuomorphic Rosewood Chassis -->
+  <rect x="4" y="4" width="952" height="312" rx="26" fill="url(#cardBg)" stroke="#EBAEE6" stroke-opacity="0.28" stroke-width="1.5" />
+  <rect x="24" y="5" width="912" height="4" rx="2" fill="url(#lotusTop)" />
+
+  <!-- Centered HFT Candlestick + Breakout Arrow Emblem -->
+  <g transform="translate(318, 26)">
+    <!-- Slanted Metallic 'H' -->
+    <path
+      d="M38 36 H59 L51.5 64 H79.5 L87 36 H108 L87 114 H66 L73.5 84 H45.5 L38 114 L14 124 L38 36 Z"
+      fill="url(#metalSilver)"
+      stroke="#FFFFFF"
+      stroke-opacity="0.35"
+      stroke-width="1"
+    />
+
+    <!-- Slanted Metallic 'F' -->
+    <path
+      d="M122 36 H186 L172 54 H138 L133.5 70 H166 L152 87 H129 L121.5 114 H100.5 L122 36 Z"
+      fill="url(#metalSilver)"
+      stroke="#FFFFFF"
+      stroke-opacity="0.35"
+      stroke-width="1"
+    />
+
+    <!-- Bullish Candlestick 'T' + Upward Breakout Arrow -->
+    <g filter="url(#candleGlow)">
+      <!-- Top Wick -->
+      <rect x="225" y="4" width="5" height="20" rx="2" fill="#84FF57" />
+      <!-- Angled Crossbar of T -->
+      <path d="M180 42 L196 22 H276 L260 42 H180 Z" fill="url(#bullCandle)" />
+      <!-- Upright Candlestick Body -->
+      <rect x="215" y="18" width="25" height="96" rx="2.5" fill="url(#bullCandle)" />
+      <!-- Bottom Wick -->
+      <rect x="225" y="114" width="5" height="20" rx="2" fill="#10985B" />
+      <!-- Diagonal Breakout Arrow -->
+      <path
+        d="M248 64 L286 28 L277 20 L314 10 L302 45 L294 37 L263 64 H248 Z"
+        fill="url(#bullCandle)"
+      />
+    </g>
+  </g>
+
+  <!-- Subtitle: AUTOMATION TRADING BOT -->
+  <text
+    x="480"
+    y="218"
+    text-anchor="middle"
+    font-family="'Inter', 'Segoe UI', Arial, sans-serif"
+    font-size="22"
+    font-weight="800"
+    letter-spacing="6.5"
+  >
+    <tspan fill="#F4F6FA">AUTOMATION </tspan>
+    <tspan fill="#4CE870">TRADING BOT</tspan>
+  </text>
+
+  <!-- Tagline: TRADE SMARTER • GROW FASTER -->
+  <text
+    x="480"
+    y="249"
+    text-anchor="middle"
+    font-family="'Inter', 'Segoe UI', Arial, sans-serif"
+    font-size="12.5"
+    font-weight="600"
+    letter-spacing="5.5"
+    fill="#D5B8B5"
+  >
+    TRADE SMARTER <tspan fill="#4CE870"> • </tspan> GROW FASTER
+  </text>
+
+  <!-- Copyright Plaque -->
+  <text
+    x="480"
+    y="286"
+    text-anchor="middle"
+    font-family="'Inter', 'Segoe UI', Arial, sans-serif"
+    font-size="11.5"
+    font-weight="500"
+    letter-spacing="1.5"
+    fill="#B99895"
+  >
+    Binance USDⓈ-M Futures Real Execution • Developed by
+    <tspan fill="#FF857A" font-weight="700"> Trading Lifestyle Quant.</tspan>
+  </text>
+</svg>
