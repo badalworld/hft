@@ -152,16 +152,11 @@ export class System1DecisionEngine {
       }
     }
 
-    // Select base leverage 10x - 15x based on asset minNotional & micro-volatility
+    // Leverage is sized by Binance's MIN_NOTIONAL against the $2.000000 margin, never
+    // by conviction: on this account more leverage means a nearer liquidation price,
+    // not more edge. The execution ladder still climbs from here if the order fails.
     const minLevForNotional = Math.ceil((minNotional * 1.02) / Math.max(0.5, baseMarginUsd));
-    let volatilityLeverage = 10;
-    if (features.volatilityAtrPct < 0.12 && prob >= 0.72) volatilityLeverage = 13;
-    else if (features.volatilityAtrPct < 0.18 && prob >= 0.65) volatilityLeverage = 12;
-    else if (features.volatilityAtrPct < 0.25 && prob >= 0.6) volatilityLeverage = 11;
-    else volatilityLeverage = 10;
-
-    // Note: Execution Engine still begins at 10x (or required leverage in 10..15) and steps 10->11->12->13->14->15 on any failure!
-    const recommendedLeverage = clamp(Math.max(10, Math.min(15, Math.max(10, Math.min(minLevForNotional, 15), volatilityLeverage >= 10 ? 10 : 10))), 10, 15);
+    const recommendedLeverage = clamp(Math.max(10, minLevForNotional), 10, 15);
 
     let choiceAction: System1TypedDecision['choiceAction'] = 'HOLD_FOR_DEEPER_PULLBACK';
     if (features.absChange24hPct > max24hOverextensionPct && prob < minConfidence + 0.12) {

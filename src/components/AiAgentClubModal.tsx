@@ -4,17 +4,60 @@ import {
   BrainCircuit,
   Cpu,
   GitBranch,
+  Library,
   Sparkles,
   TrendingUp,
   X,
 } from 'lucide-react';
 import type {
+  AiCouncilBallot,
   DashboardSnapshot,
   LocalDecisionConfig,
   LocalDecisionProvider,
 } from '../types/hft';
 import { fmt6, fmtSigned6, fmtSignedUsd6 } from '../utils/format';
 import { LotusSelect } from './LotusSelect';
+
+const CouncilBallots: React.FC<{ ballots: AiCouncilBallot[] }> = ({ ballots }) => (
+  <div className="mt-2 space-y-1.5">
+    {ballots.map((b) => (
+      <div
+        key={b.param}
+        className={`skeuo-oled rounded-lg border px-2.5 py-2 ${
+          b.approved ? 'border-[#ADEBB3]/40' : 'border-[#FF857A]/35'
+        }`}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-1.5">
+          <span
+            className={`font-mono-num text-[11px] font-bold ${
+              b.approved ? 'text-[#ADEBB3]' : 'text-[#FF857A] line-through decoration-[#FF857A]/60'
+            }`}
+          >
+            {b.change}
+          </span>
+          <span className="font-mono-num text-[10px] uppercase tracking-wider text-[#EBAEE6]">
+            {b.forCount}/{b.votes.length} council
+          </span>
+        </div>
+        <ul className="mt-1 space-y-0.5">
+          {b.votes.map((v) => (
+            <li key={v.agent} className="flex gap-1.5 text-[10px] leading-tight">
+              <span
+                className={`shrink-0 font-bold ${
+                  v.vote === 'FOR' ? 'text-[#ADEBB3]' : 'text-[#FF857A]'
+                }`}
+              >
+                {v.vote === 'FOR' ? '+' : '−'}
+              </span>
+              <span className="shrink-0 font-semibold text-[#fdf6f5]">{v.agentName}:</span>
+              <span className="text-[#c7a8a5]">{v.why}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    ))}
+  </div>
+);
 
 interface AiAgentClubModalProps {
   open: boolean;
@@ -269,6 +312,92 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
                             {adj}
                           </span>
                         ))}
+                      </div>
+                    )}
+
+                    {t.postMortem.councilBallots && t.postMortem.councilBallots.length > 0 ? (
+                      <>
+                        <div className="mt-2 text-[11px] text-[#fdf6f5]">
+                          <strong className="uppercase tracking-wider text-[#D9A441]">
+                            Club discussion:
+                          </strong>{' '}
+                          {t.postMortem.agentConsensusSummary}
+                        </div>
+                        <CouncilBallots ballots={t.postMortem.councilBallots} />
+                        {t.postMortem.nextStep && (
+                          <div className="mt-1.5 text-[11px] text-[#EBAEE6]">
+                            <strong>Next step:</strong> {t.postMortem.nextStep}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="mt-2 text-[10px] italic text-[#a58784]">
+                        Settled before the improvement council was wired in — no ballots on record.
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 3b. SHARED MEMORY — what every agent recalls before it votes */}
+          <div className="skeuo-plate rounded-xl p-4">
+            <div className="mb-3 flex items-center gap-2">
+              <Library className="h-4 w-4 text-[#D9A441]" />
+              <h3 className="text-xs font-bold uppercase tracking-[0.14em] text-white">
+                Shared Memory — Recalled by Every Agent on Entry
+              </h3>
+            </div>
+
+            {(snapshot?.lessonPatterns ?? []).length === 0 ? (
+              <div className="skeuo-oled rounded-xl p-4 text-center text-[11px] text-[#d5b8b5]">
+                No settled trades have been absorbed yet. The first post-mortem writes the first
+                lesson, and from then on every entry gate reads it before it votes.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                {(snapshot?.lessonPatterns ?? []).slice(0, 8).map((p) => (
+                  <div
+                    key={p.key}
+                    className="skeuo-oled flex flex-wrap items-center justify-between gap-1.5 rounded-lg px-2.5 py-2"
+                  >
+                    <span className="font-mono-num text-[10px] font-bold text-[#fdf6f5]">
+                      {p.key}
+                    </span>
+                    <span className="font-mono-num text-[10px] text-[#c7a8a5]">
+                      {p.sampleCount} trade{p.sampleCount === 1 ? '' : 's'} •{' '}
+                      <span className={p.winRatePct >= 50 ? 'text-[#ADEBB3]' : 'text-[#FF857A]'}>
+                        {fmt6(p.winRatePct)}%
+                      </span>{' '}
+                      • {fmtSignedUsd6(p.netPnlTotal)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {(snapshot?.lessons ?? []).length > 0 && (
+              <div className="mt-3 max-h-40 space-y-1.5 overflow-y-auto pr-1">
+                {(snapshot?.lessons ?? []).slice(0, 6).map((l) => (
+                  <div key={l.id} className="skeuo-oled rounded-lg px-2.5 py-2 text-[10px]">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono-num font-bold text-white">
+                        {l.symbol} ({l.side})
+                      </span>
+                      <span
+                        className={`font-mono-num font-bold ${
+                          l.netPnl >= 0 ? 'text-[#ADEBB3]' : 'text-[#FF857A]'
+                        }`}
+                      >
+                        {fmtSignedUsd6(l.netPnl)}
+                      </span>
+                      <span className="text-[#D9A441]">{l.verdict}</span>
+                    </div>
+                    <div className="mt-0.5 text-[#c7a8a5]">{l.miss}</div>
+                    {l.appliedAdjustments.length > 0 && (
+                      <div className="mt-1 font-mono-num text-[9px] text-[#EBAEE6]">
+                        taught: {l.appliedAdjustments.join(' • ')}
                       </div>
                     )}
                   </div>

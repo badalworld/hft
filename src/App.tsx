@@ -8,6 +8,7 @@ import { OpenTradesDeck } from './components/OpenTradesDeck';
 import { MarketScannerDeck } from './components/MarketScannerDeck';
 import { SettingsVaultModal } from './components/SettingsVaultModal';
 import { AiAgentClubModal } from './components/AiAgentClubModal';
+import { PnlLedgerModal } from './components/PnlLedgerModal';
 import { SystemLogsDrawer } from './components/SystemLogsDrawer';
 import { HftBrandLogo } from './components/HftBrandLogo';
 
@@ -29,6 +30,7 @@ export const App: React.FC = () => {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aiClubOpen, setAiClubOpen] = useState(false);
+  const [pnlLedgerOpen, setPnlLedgerOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
@@ -85,6 +87,7 @@ export const App: React.FC = () => {
           actionBusy={actionBusy}
           errorCount={errorCount}
           onToggleEngine={handleToggleEngine}
+          onOpenPnlLedger={() => setPnlLedgerOpen(true)}
           onOpenAiClub={() => setAiClubOpen(true)}
           onOpenLogs={() => setLogsOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
@@ -133,6 +136,12 @@ export const App: React.FC = () => {
         onResetStartBalance={resetStartBalance}
         onRescanIps={rescanIps}
         onBindLocalIp={bindLocalIp}
+      />
+
+      <PnlLedgerModal
+        open={pnlLedgerOpen}
+        snapshot={snapshot}
+        onClose={() => setPnlLedgerOpen(false)}
       />
 
       <AiAgentClubModal

@@ -25,6 +25,13 @@ export function fmtSignedUsd6(val: number | string | null | undefined): string {
   return `+$${n.toFixed(6)}`;
 }
 
+/** Per-trade Binance fees are stored as a positive magnitude; the ledger shows the outflow. */
+export function fmtOutflowUsd6(val: number | string | null | undefined): string {
+  const n = typeof val === 'string' ? parseFloat(val) : Number(val ?? 0);
+  if (!Number.isFinite(n)) return '-$0.000000';
+  return `-$${Math.abs(n).toFixed(6)}`;
+}
+
 export function formatDurationClock(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '00:00:00 (0.000000s)';
   const whole = Math.floor(seconds);

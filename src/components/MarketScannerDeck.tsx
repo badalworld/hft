@@ -5,6 +5,7 @@ import {
   PauseOctagon,
   Radar,
   Radio,
+  RefreshCw,
 } from 'lucide-react';
 import type { ScannerAsset, ScannerOperatingState } from '../types/hft';
 import { fmt6, fmtSigned6 } from '../utils/format';
@@ -142,6 +143,15 @@ const ScannerTableBank: React.FC<{
                     <div className="font-mono-num text-[9px] text-[#b99895]">
                       {asset.candleCount15s} bars • {asset.recommendedLeverage}x-15x
                     </div>
+                    {asset.substitutedFor && (
+                      <div
+                        title={`${asset.substitutedFor} is cooling; this slot was re-awarded to the next-ranked mover.`}
+                        className="mt-0.5 inline-flex items-center gap-1 rounded border border-[#D9A441]/45 bg-[#D9A441]/12 px-1.5 py-[1px] font-mono-num text-[9px] text-[#D9A441]"
+                      >
+                        <RefreshCw className="h-2.5 w-2.5" />
+                        {asset.substitutedFor.replace('USDT', '')} out
+                      </div>
+                    )}
                   </td>
                   <td
                     className={`px-2 py-2 text-right font-mono-num font-bold ${

@@ -54,6 +54,17 @@ export interface RawPositionRisk {
   updateTime: number;
 }
 
+export interface UmIncomeRecord {
+  symbol: string;
+  incomeType: 'REALIZED_PNL' | 'FUNDING_FEE' | 'COMMISSION' | 'TRANSFER' | string;
+  income: string;
+  asset: string;
+  time: number;
+  info?: string;
+  tranId: number;
+  tradeId?: string;
+}
+
 export interface RawOrderResult {
   orderId: number;
   symbol: string;
@@ -631,6 +642,28 @@ export class BinanceFuturesRestClient {
     } catch {
       return 0.0005;
     }
+  }
+
+  public async getUmIncome(params: {
+    startTime: number;
+    endTime?: number;
+    incomeType?: string;
+    limit?: number;
+  }): Promise<UmIncomeRecord[]> {
+    return this.rawRequest<UmIncomeRecord[]>({
+      method: 'GET',
+      path: '/papi/v1/um/income',
+      api: 'PAPI',
+      params: {
+        startTime: params.startTime,
+        endTime: params.endTime,
+        incomeType: params.incomeType,
+        limit: params.limit ?? 1000,
+      },
+      signed: true,
+      priority: 'P2_ACCOUNT_SYNC',
+      weight: 30,
+    });
   }
 
   public async setLeverage(symbol: string, leverage: number): Promise<number> {

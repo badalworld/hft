@@ -2,13 +2,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { ClosedTradeRecord } from '../server/types.js';
+import type { BinanceFuturesRestClient } from '../server/binance/restClient.js';
+import type { BinanceWsStreamManager } from '../server/binance/wsStreamManager.js';
 import { CandleBuilder15s } from '../server/binance/candleBuilder15s.js';
 import { evaluate15sPullbackStrategy } from '../server/engine/strategy15s.js';
 import {
   AiAgentClubOrchestrator,
   createDefaultStyleParams,
 } from '../server/ai/agentClubGraph.js';
+import { buildTradeLesson } from '../server/ai/lessonMemory.js';
 import { createDefaultSystem1Weights } from '../server/ai/system1Primitives.js';
+import { MarketScanner40 } from '../server/engine/marketScanner.js';
+import { buildPnlLedger } from '../server/engine/pnlLedger.js';
 import { PositionMonitor1s } from '../server/engine/positionMonitor1s.js';
 import { StateStore } from '../server/engine/stateStore.js';
 import { f6, formatOrderQty } from '../server/utils/format.js';
@@ -161,6 +167,195 @@ async function runSelfTests() {
     const exits = monitor.tickRealtimePrices(() => 10.08, style); // +8.000000% ROI <= trail ~8.85%
     assert.equal(exits.length, 1);
     assert.ok(exits[0].reason.includes('TRAILING_STOP_HIT'));
+
+    console.log('6. Verifying Improvement Council ballots, lesson memory & shared-memory veto...');
+    assert.ok(pmLoss.analysis.councilBallots && pmLoss.analysis.councilBallots.length > 0);
+    const approvedBallots = (pmLoss.analysis.councilBallots || []).filter((b) => b.approved);
+    // Only consensus-approved proposals may reach the live parameter set.
+    assert.equal(approvedBallots.length, pmLoss.analysis.styleAdjustments.length);
+    for (const m of approvedBallots) {
+      assert.ok(m.forCount >= 2, `${m.change} applied without a quorum`);
+      assert.equal(m.votes.length, 3, `${m.change} was not voted by three seats`);
+    }
+    assert.ok(pmLoss.analysis.agentConsensusSummary.includes('APPROVED'));
+    assert.ok(pmLoss.analysis.nextStep!.includes('LONG'));
+    assert.equal(club.getLessons().length, 1);
+
+    // Four losing closes of the SAME setup must make the club poorer that setup's
+    // probability by 0.06 — shared memory actually moving the entry gate.
+    const memoryClub = new AiAgentClubOrchestrator({
+      styleParams: createDefaultStyleParams(),
+      system1Weights: createDefaultSystem1Weights(),
+      localConfig: {
+        provider: 'builtin',
+        endpointUrl: 'http://127.0.0.1:11434',
+        modelName: 'nimble',
+        lastLatencyMs: 0,
+        lastStatus: 'Ready',
+      },
+    });
+    const plainDecision = await memoryClub.evaluateEntryCandidate({
+      symbol: 'MEMOUSDT',
+      side: 'LONG',
+      features: stratEval.features,
+      minNotional: 5,
+    });
+    const lessonSeed = {
+      closedAt: Date.now(),
+      symbol: 'MEMOUSDT',
+      side: 'LONG' as const,
+      netPnl: -0.3,
+      entryFeatures: stratEval.features,
+    };
+    const losingAnalysis = {
+      verdict: 'LOSS_PREMATURE_PULLBACK' as const,
+      whatWorkedBest: 'x',
+      whatWeMissed: 'Entry fired before the pullback exhausted.',
+      styleAdjustments: [],
+      mfeCaptureRatio: 0,
+      brierLoss: 0.5,
+      agentConsensusSummary: 'no changes',
+    };
+    for (let i = 0; i < 4; i++) {
+      memoryClub.absorbLesson(buildTradeLesson(lessonSeed, losingAnalysis));
+    }
+    const recalled = await memoryClub.evaluateEntryCandidate({
+      symbol: 'MEMOUSDT',
+      side: 'LONG',
+      features: stratEval.features,
+      minNotional: 5,
+    });
+    assert.ok(recalled.lessonGuidance.includes('HISTORICAL BLEED'));
+    assert.ok(
+      Math.abs(recalled.confidence - (plainDecision.confidence - 0.06)) < 1e-9,
+      `memory did not discount the probability: ${plainDecision.confidence} -> ${recalled.confidence}`
+    );
+
+    console.log('7. Verifying cooldown swaps the scanner basket and PNL ledger maths...');
+    const universe = Array.from({ length: 22 }, (_, i) => `S${String(i).padStart(2, '0')}USDT`);
+    const stubRest = {
+      getAllTradableSymbols: () => new Set(universe),
+      getSymbolFilter: () => null,
+      getRecentAggTrades: async () => [],
+    } as unknown as BinanceFuturesRestClient;
+    const stubWs = {
+      getLastPrice: () => 1,
+      getMarkPrice: () => 0,
+    } as unknown as BinanceWsStreamManager;
+    const stubCandles = {
+      getTechnicalSnapshot: () => ({
+        candleCount: 10,
+        rsi7: 44,
+        ema9: 1,
+        ema21: 1,
+        pullbackDepthPct: 0.3,
+        orderflowDeltaRatio: 1.3,
+      }),
+      warmupFromHistoricalAggTrades: () => {},
+    } as unknown as CandleBuilder15s;
+    const scan = new MarketScanner40(stubRest, stubWs, stubCandles);
+    scan.ingestTickerBatch(
+      universe.map((symbol, i) => ({
+        symbol,
+        priceChangePercent: 100 - i,
+        lastPrice: 1,
+        highPrice: 1,
+        lowPrice: 1,
+        quoteVolume: 9_000_000,
+      }))
+    );
+    const coolMap = new Map<string, number>([['S00USDT', Date.now() + 120_000]]);
+    const scanParams = {
+      style: createDefaultStyleParams(),
+      openPositionSymbols: new Set<string>(),
+      cooldownUntilMap: coolMap,
+      scannerPausedForMargin: false,
+    };
+    const basket1 = scan.refreshTop40Universe(scanParams);
+    const longs1 = basket1.positive.map((a) => a.symbol);
+    assert.equal(basket1.positive.length, 20, 'basket shrank instead of backfilling');
+    assert.ok(!longs1.includes('S00USDT'), 'cooling symbol stayed in the scan list');
+    assert.equal(longs1[0], 'S01USDT');
+    const lastEntry = basket1.positive[19];
+    assert.equal(lastEntry.symbol, 'S20USDT', 'next-ranked mover did not backfill the freed slot');
+    assert.equal(lastEntry.substitutedFor, 'S00USDT');
+    assert.equal(lastEntry.cooldownUntil, 0);
+
+    // Cooldown expiring must pull the symbol straight back into rank 1 and drop S20USDT.
+    coolMap.delete('S00USDT');
+    const longs2 = scan.refreshTop40Universe(scanParams).positive.map((a) => a.symbol);
+    assert.ok(longs2.includes('S00USDT'), 'recovered symbol did not return to the scan list');
+    assert.ok(!longs2.includes('S20USDT'), 'substitute was not displaced when the slot reopened');
+
+    const mk = (
+      sym: string,
+      side: 'LONG' | 'SHORT',
+      net: number,
+      gross: number,
+      fees: number,
+      closedAt: number
+    ): ClosedTradeRecord => ({
+      id: `${sym}-${closedAt}`,
+      symbol: sym,
+      side,
+      leverage: 10,
+      quantity: 1,
+      entryPrice: 1,
+      exitPrice: 1,
+      initialMargin: 2,
+      grossPnl: gross,
+      binanceFees: fees,
+      netPnl: net,
+      finalRoiPct: 1,
+      peakRoiPct: 2,
+      worstRoiPct: -1,
+      openedAt: closedAt - 30_000,
+      closedAt,
+      durationSec: 30,
+      exitReason: 'TRAILING_STOP_HIT',
+      entryFeatures: stratEval.features,
+      postMortem: losingAnalysis,
+    });
+    const t0 = 1_700_000_000_000;
+    const ledger = buildPnlLedger(
+      [
+        mk('AUSDT', 'LONG', 0.1, 0.12, 0.02, t0),
+        mk('BUSDT', 'LONG', -0.05, -0.03, 0.02, t0 + 1000),
+        mk('CUSDT', 'SHORT', 0.2, 0.22, 0.02, t0 + 2000),
+        mk('BUSDT', 'SHORT', -0.08, -0.06, 0.02, t0 + 3000),
+      ],
+      {
+        available: true,
+        status: 'synced',
+        lastSyncAt: t0,
+        sinceMs: t0,
+        fundingFeeTotal: -0.014,
+        fundingFeeAccountTotal: -0.02,
+        commissionTotal: -0.08,
+        realizedPnlTotal: 0.17,
+        otherIncomeTotal: 0,
+        recordCount: 12,
+      }
+    );
+    assert.equal(ledger.stats.totalTrades, 4);
+    assert.equal(ledger.stats.winTrades, 2);
+    assert.equal(f6(ledger.stats.winRatePct), '50.000000');
+    assert.equal(ledger.stats.longTrades, 2);
+    assert.equal(ledger.stats.shortTrades, 2);
+    assert.equal(ledger.stats.longWinTrades, 1);
+    assert.equal(ledger.stats.shortWinTrades, 1);
+    assert.equal(f6(ledger.stats.longWinRatePct), '50.000000');
+    assert.equal(f6(ledger.stats.shortWinRatePct), '50.000000');
+    assert.equal(f6(ledger.stats.totalBinanceFees), '0.080000');
+    // Funding is the exchange-settled number, not the engine's taker estimate.
+    assert.equal(f6(ledger.stats.totalFundingFees), '-0.014000');
+    assert.equal(f6(ledger.stats.totalNetPnl + ledger.stats.totalFundingFees), '0.156000');
+    assert.equal(ledger.points.length, 4);
+    assert.equal(f6(ledger.points[0].cumulativeNet), '0.100000');
+    assert.equal(f6(ledger.points[1].cumulativeNet), '0.050000');
+    assert.equal(f6(ledger.points[3].cumulativeNet), '0.170000');
+    assert.equal(f6(ledger.points[2].cumulativeSideNet), '0.200000');
+    assert.equal(ledger.points[0].symbol, 'AUSDT', 'points must be oldest-close first');
 
     console.log('✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!');
   } finally {

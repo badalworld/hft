@@ -3,6 +3,13 @@ import type { BinanceFuturesRestClient } from '../binance/restClient.js';
 import type { BinanceWsStreamManager, Ticker24hStreamItem } from '../binance/wsStreamManager.js';
 import type { CandleBuilder15s } from '../binance/candleBuilder15s.js';
 import { evaluate15sPullbackStrategy } from './strategy15s.js';
+import { logger } from '../utils/logger.js';
+
+interface RankResult {
+  picks: Ticker24hStreamItem[];
+  substitutedFor: Map<string, string>;
+  cooledOut: string[];
+}
 
 export class MarketScanner40 {
   private positiveAssets: ScannerAsset[] = [];
@@ -11,6 +18,8 @@ export class MarketScanner40 {
   private warmedSymbols = new Set<string>();
   private warmupInFlight = false;
   private lastRankRefreshAt = 0;
+  private coolingSignature = '';
+  private lastSwapNotes = new Set<string>();
 
   constructor(
     private readonly restClient: BinanceFuturesRestClient,
@@ -47,13 +56,24 @@ export class MarketScanner40 {
     const now = Date.now();
     const tradableSet = this.restClient.getAllTradableSymbols();
 
-    // Re-rank top 20 positive & top 20 negative every 4 seconds (keeps symbol basket stable across 15s bars while staying fresh)
+    // Re-rank top 20 positive & top 20 negative every 4 seconds (keeps symbol basket
+    // stable across 15s bars while staying fresh) — and immediately whenever the
+    // cooldown set changes, so a cooled symbol leaves the list on the next tick
+    // instead of sitting there untradeable for up to 4 seconds.
+    const coolingNow = Array.from(params.cooldownUntilMap.entries())
+      .filter(([, until]) => until > now)
+      .map(([sym]) => sym)
+      .sort()
+      .join(',');
+
     const shouldReRank =
       now - this.lastRankRefreshAt >= 4000 ||
+      coolingNow !== this.coolingSignature ||
       (this.positiveAssets.length === 0 && this.latestTickers.size > 0);
 
     if (shouldReRank && !params.scannerPausedForMargin) {
       this.lastRankRefreshAt = now;
+      this.coolingSignature = coolingNow;
       const validTickers: Ticker24hStreamItem[] = [];
 
       for (const t of this.latestTickers.values()) {
@@ -66,21 +86,39 @@ export class MarketScanner40 {
         validTickers.push(t);
       }
 
-      const topPos = validTickers
+      const sortedPos = validTickers
         .filter((t) => t.priceChangePercent > 0)
-        .sort((a, b) => b.priceChangePercent - a.priceChangePercent)
-        .slice(0, 20);
+        .sort((a, b) => b.priceChangePercent - a.priceChangePercent);
 
-      const topNeg = validTickers
+      const sortedNeg = validTickers
         .filter((t) => t.priceChangePercent < 0)
-        .sort((a, b) => a.priceChangePercent - b.priceChangePercent)
-        .slice(0, 20);
+        .sort((a, b) => a.priceChangePercent - b.priceChangePercent);
 
-      this.positiveAssets = topPos.map((t, idx) =>
-        this.buildScannerAsset(t, 'POSITIVE_TOP20', 'LONG', idx + 1, params, now)
+      const posRanked = this.rankBucket(sortedPos, params, now, 20);
+      const negRanked = this.rankBucket(sortedNeg, params, now, 20);
+      this.logCooldownSwaps(posRanked, negRanked, params, now);
+
+      this.positiveAssets = posRanked.picks.map((t, idx) =>
+        this.buildScannerAsset(
+          t,
+          'POSITIVE_TOP20',
+          'LONG',
+          idx + 1,
+          params,
+          now,
+          posRanked.substitutedFor.get(t.symbol) || null
+        )
       );
-      this.negativeAssets = topNeg.map((t, idx) =>
-        this.buildScannerAsset(t, 'NEGATIVE_TOP20', 'SHORT', idx + 1, params, now)
+      this.negativeAssets = negRanked.picks.map((t, idx) =>
+        this.buildScannerAsset(
+          t,
+          'NEGATIVE_TOP20',
+          'SHORT',
+          idx + 1,
+          params,
+          now,
+          negRanked.substitutedFor.get(t.symbol) || null
+        )
       );
     } else if (!params.scannerPausedForMargin) {
       // Update live prices & 15s technicals on current 40 assets
@@ -94,7 +132,15 @@ export class MarketScanner40 {
           lowPrice: a.low24h,
           quoteVolume: a.quoteVolume24h,
         };
-        return this.buildScannerAsset(ticker, 'POSITIVE_TOP20', 'LONG', idx + 1, params, now);
+        return this.buildScannerAsset(
+          ticker,
+          'POSITIVE_TOP20',
+          'LONG',
+          idx + 1,
+          params,
+          now,
+          a.substitutedFor
+        );
       });
 
       this.negativeAssets = this.negativeAssets.map((a, idx) => {
@@ -107,7 +153,15 @@ export class MarketScanner40 {
           lowPrice: a.low24h,
           quoteVolume: a.quoteVolume24h,
         };
-        return this.buildScannerAsset(ticker, 'NEGATIVE_TOP20', 'SHORT', idx + 1, params, now);
+        return this.buildScannerAsset(
+          ticker,
+          'NEGATIVE_TOP20',
+          'SHORT',
+          idx + 1,
+          params,
+          now,
+          a.substitutedFor
+        );
       });
     }
 
@@ -131,6 +185,83 @@ export class MarketScanner40 {
     };
   }
 
+  /**
+   * Take the top `size` movers of one bucket, skipping symbols still in cooldown,
+   * while keeping every symbol that currently holds a position on screen. Because
+   * cooled symbols are dropped rather than left in place, the next-ranked mover
+   * walks into the freed slot — that pairing is what `substitutedFor` records.
+   */
+  private rankBucket(
+    sorted: Ticker24hStreamItem[],
+    params: {
+      openPositionSymbols: Set<string>;
+      cooldownUntilMap: Map<string, number>;
+    },
+    now: number,
+    size: number
+  ): RankResult {
+    const isCooling = (sym: string) => (params.cooldownUntilMap.get(sym) || 0) > now;
+    const cut = sorted.slice(0, size);
+    const picks: Ticker24hStreamItem[] = [];
+
+    for (const t of sorted) {
+      if (picks.length >= size) break;
+      if (isCooling(t.symbol) && !params.openPositionSymbols.has(t.symbol)) continue;
+      picks.push(t);
+    }
+
+    const cooledOut = cut.filter(
+      (t) => isCooling(t.symbol) && !params.openPositionSymbols.has(t.symbol)
+    );
+    const dropped = cut.filter((t) => !picks.some((p) => p.symbol === t.symbol));
+    const entrants = picks.filter((t) => !cut.some((p) => p.symbol === t.symbol));
+
+    const substitutedFor = new Map<string, string>();
+    entrants.forEach((entry, i) => {
+      const freed = dropped[i];
+      if (freed) substitutedFor.set(entry.symbol, freed.symbol);
+    });
+
+    return { picks, substitutedFor, cooledOut: cooledOut.map((t) => t.symbol) };
+  }
+
+  private logCooldownSwaps(
+    pos: RankResult,
+    neg: RankResult,
+    params: { cooldownUntilMap: Map<string, number> },
+    now: number
+  ) {
+    const notes = new Set<string>();
+    const all = [pos, neg];
+
+    for (const bucket of all) {
+      for (const sym of bucket.cooledOut) {
+        const until = params.cooldownUntilMap.get(sym) || 0;
+        notes.add(
+          `PULL:${sym}:${Math.max(0, Math.round((until - now) / 1000))}`
+        );
+      }
+      for (const [entrant, freed] of bucket.substitutedFor) {
+        notes.add(`ADD:${entrant}:${freed}`);
+      }
+    }
+
+    for (const note of notes) {
+      if (this.lastSwapNotes.has(note)) continue;
+      const [kind, sym, rest] = note.split(':');
+      if (kind === 'PULL') {
+        logger.info(
+          'SCANNER',
+          `${sym} removed from scan list — cooling for ${rest}s. Slot opened for the next-ranked mover.`
+        );
+      } else {
+        logger.success('SCANNER', `${sym} substituted into the scan list, replacing ${rest}.`);
+      }
+    }
+
+    this.lastSwapNotes = notes;
+  }
+
   private buildScannerAsset(
     t: Ticker24hStreamItem,
     bucket: 'POSITIVE_TOP20' | 'NEGATIVE_TOP20',
@@ -141,7 +272,8 @@ export class MarketScanner40 {
       openPositionSymbols: Set<string>;
       cooldownUntilMap: Map<string, number>;
     },
-    now: number
+    now: number,
+    substitutedFor: string | null
   ): ScannerAsset {
     const snap = this.candleBuilder.getTechnicalSnapshot(t.symbol, side);
     const liveLast = this.wsManager.getLastPrice(t.symbol) || t.lastPrice;
@@ -185,6 +317,8 @@ export class MarketScanner40 {
       recommendedLeverage: minLev,
       candleCount15s: snap.candleCount,
       lastSignalReason: eval15s.reason,
+      cooldownUntil: cdUntil,
+      substitutedFor,
       updatedAt: now,
     };
   }

@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   BrainCircuit,
+  LineChart,
   Power,
   ScrollText,
   Settings,
@@ -18,6 +19,7 @@ interface HeaderChassisProps {
   actionBusy: boolean;
   errorCount: number;
   onToggleEngine: (next: boolean) => void;
+  onOpenPnlLedger: () => void;
   onOpenAiClub: () => void;
   onOpenLogs: () => void;
   onOpenSettings: () => void;
@@ -29,6 +31,7 @@ export const HeaderChassis: React.FC<HeaderChassisProps> = ({
   actionBusy,
   errorCount,
   onToggleEngine,
+  onOpenPnlLedger,
   onOpenAiClub,
   onOpenLogs,
   onOpenSettings,
@@ -118,6 +121,26 @@ export const HeaderChassis: React.FC<HeaderChassisProps> = ({
 
         {/* Right: Physical Tactile Rosewood & Lotus Switches */}
         <div className="flex flex-wrap items-center gap-2.5">
+          <button
+            type="button"
+            onClick={onOpenPnlLedger}
+            className="skeuo-btn flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium text-[#fdf6f5]"
+          >
+            <LineChart className="h-4 w-4 text-[#D9A441]" />
+            <span>PNL Ledger</span>
+            {snapshot && (snapshot.pnlLedger?.stats.totalTrades ?? 0) > 0 && (
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  (snapshot.pnlLedger?.stats.totalNetPnl ?? 0) >= 0 ? 'led-mint' : 'led-coral'
+                }`}
+                title={`Net settled PNL ${(snapshot.pnlLedger?.stats.totalNetPnl ?? 0).toFixed(6)} USDT`}
+              />
+            )}
+            <span className="rounded-full bg-[#D9A441]/25 px-1.5 py-0.2 font-mono-num text-[10px] font-bold text-[#D9A441]">
+              {snapshot?.pnlLedger?.stats.totalTrades ?? 0}
+            </span>
+          </button>
+
           <button
             type="button"
             onClick={onOpenAiClub}

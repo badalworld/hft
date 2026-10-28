@@ -6,10 +6,27 @@ import type {
   AiPostMortemAnalysis,
   EntryFeatureVector,
   LocalDecisionConfig,
+  LessonPattern,
   StyleMutationRecord,
   System1Weights,
+  TradeLesson,
 } from '../types.js';
 import { System1DecisionEngine } from './system1Primitives.js';
+import {
+  aggregateLessonPatterns,
+  buildTradeLesson,
+  lessonKey,
+  prependLesson,
+  recallLessons,
+} from './lessonMemory.js';
+import {
+  castBallots,
+  consensusLine,
+  nextStepLine,
+  type Ballot,
+  type CouncilContext,
+  type MutationProposal,
+} from './improvementCouncil.js';
 import { clamp, f6 } from '../utils/format.js';
 import { logger } from '../utils/logger.js';
 
@@ -95,6 +112,11 @@ const EntryStateAnnotation = Annotation.Root({
   side: Annotation<'LONG' | 'SHORT'>,
   features: Annotation<EntryFeatureVector>,
   minNotional: Annotation<number>,
+  lessonKey: Annotation<string>,
+  lessonGuidance: Annotation<string>,
+  lessonSamples: Annotation<number>,
+  lessonWinRatePct: Annotation<number>,
+  confidenceDelta: Annotation<number>,
   regimeApproved: Annotation<boolean>,
   sniperApproved: Annotation<boolean>,
   system1Approved: Annotation<boolean>,
@@ -117,11 +139,14 @@ const PostMortemStateAnnotation = Annotation.Root({
   durationSec: Annotation<number>,
   exitReason: Annotation<string>,
   features: Annotation<EntryFeatureVector>,
+  lessonKey: Annotation<string>,
   verdict: Annotation<AiPostMortemAnalysis['verdict']>,
   whatWorkedBest: Annotation<string>,
   whatWeMissed: Annotation<string>,
   mfeCaptureRatio: Annotation<number>,
   brierLoss: Annotation<number>,
+  proposals: Annotation<MutationProposal[]>,
+  ballots: Annotation<Ballot[]>,
   mutations: Annotation<Array<{ param: string; before: number; after: number; reason: string }>>,
 });
 
@@ -131,6 +156,8 @@ export class AiAgentClubOrchestrator {
   private styleParams: AdaptiveStyleParams;
   private system1Weights: System1Weights;
   private localConfig: LocalDecisionConfig;
+  /** Shared memory every node reads before it votes or decides. */
+  private lessons: TradeLesson[];
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private compiledEntryGraph: any;
@@ -142,11 +169,13 @@ export class AiAgentClubOrchestrator {
     styleParams: AdaptiveStyleParams;
     system1Weights: System1Weights;
     localConfig: LocalDecisionConfig;
+    lessons?: TradeLesson[];
   }) {
     this.agents = init.agents?.length ? init.agents : createInitialAgents();
     this.styleParams = init.styleParams;
     this.system1Weights = init.system1Weights;
     this.localConfig = init.localConfig;
+    this.lessons = init.lessons || [];
 
     this.compiledEntryGraph = this.buildEntryStateGraph();
     this.compiledPostMortemGraph = this.buildPostMortemStateGraph();
@@ -154,6 +183,18 @@ export class AiAgentClubOrchestrator {
 
   public getAgents(): AgentMemberStatus[] {
     return this.agents;
+  }
+
+  public getLessons(): TradeLesson[] {
+    return this.lessons;
+  }
+
+  public getLessonPatterns(): LessonPattern[] {
+    return aggregateLessonPatterns(this.lessons);
+  }
+
+  public hydrateLessons(lessons: TradeLesson[]) {
+    this.lessons = lessons;
   }
 
   public getStyleParams(): AdaptiveStyleParams {
@@ -187,6 +228,28 @@ export class AiAgentClubOrchestrator {
 
   private buildEntryStateGraph() {
     const graph = new StateGraph(EntryStateAnnotation)
+      .addNode('sharedMemoryRecall', async (state) => {
+        const recall = recallLessons(this.lessons, {
+          symbol: state.symbol,
+          side: state.side,
+          features: state.features,
+        });
+        this.touchAgent(
+          'hermes-evolver',
+          `Recalled ${recall.key}: ${recall.sampleCount} closed trade(s) at ${f6(
+            recall.winRatePct
+          )}% win -> confidence ${recall.confidenceDelta >= 0 ? '+' : ''}${f6(
+            recall.confidenceDelta
+          )}`
+        );
+        return {
+          lessonKey: recall.key,
+          lessonGuidance: recall.guidance,
+          lessonSamples: recall.sampleCount,
+          lessonWinRatePct: recall.winRatePct,
+          confidenceDelta: recall.confidenceDelta,
+        };
+      })
       .addNode('alphaScout', async (state) => {
         const f = state.features;
         const maxOverext = this.styleParams.max24hOverextensionPct;
@@ -195,7 +258,9 @@ export class AiAgentClubOrchestrator {
           'alpha-scout',
           `${state.symbol} (${state.side}): 24h Δ ${f6(f.absChange24hPct)}% -> ${
             ok ? 'REGIME_PASS' : 'OVEREXTENDED_CAUTION'
-          }`
+          } | Hermes: ${state.lessonKey} ${f6(state.lessonWinRatePct)}% win / ${
+            state.lessonSamples
+          } trades`
         );
         return {
           regimeApproved: ok,
@@ -207,24 +272,27 @@ export class AiAgentClubOrchestrator {
           return { sniperApproved: false };
         }
         const f = state.features;
-        const deltaOk = f.orderflowDeltaRatio >= this.styleParams.minOrderflowDeltaRatio * 0.92;
+        const threshold = this.styleParams.minOrderflowDeltaRatio;
+        const deltaOk = f.orderflowDeltaRatio >= threshold;
         const bodyOk =
           f.candleBodyRatio >= this.styleParams.minConfirmationBodyRatio ||
           f.wickRejectionRatio >= 0.42;
         const passed = deltaOk && bodyOk;
         this.touchAgent(
           'microstructure-sniper',
-          `${state.symbol} 15s: RSI=${f6(f.rsi15s)} Delta=${f6(f.orderflowDeltaRatio)}x -> ${
-            passed ? 'CONFIRMED' : 'WEAK_TAPE'
-          }`
+          `${state.symbol} 15s: RSI=${f6(f.rsi15s)} Delta=${f6(
+            f.orderflowDeltaRatio
+          )}x vs ${f6(threshold)}x -> ${passed ? 'CONFIRMED' : 'WEAK_TAPE'} | ${
+            state.lessonGuidance
+          }`.slice(0, 200)
         );
         return {
           sniperApproved: passed,
           vetoReason: passed
             ? ''
-            : `15s confirmation filtered (Delta=${f6(f.orderflowDeltaRatio)}x, Body=${f6(
-                f.candleBodyRatio
-              )})`,
+            : `15s confirmation filtered (Delta=${f6(f.orderflowDeltaRatio)}x vs required ${f6(
+                threshold
+              )}x, Body=${f6(f.candleBodyRatio)})`,
         };
       })
       .addNode('system1Judge', async (state) => {
@@ -243,20 +311,31 @@ export class AiAgentClubOrchestrator {
           config: this.localConfig,
         });
 
+        // Shared memory nudges the probability, then the gate is re-applied so a
+        // historically losing setup genuinely has to clear a higher bar.
+        const adjusted = clamp(decision.calibratedScore + state.confidenceDelta, 0, 1);
+        const approved = adjusted >= this.styleParams.minAiConfidenceScore;
+
         this.touchAgent(
           'system1-judge',
-          `${state.symbol}: p=${f6(decision.calibratedScore)} (${decision.choiceAction}) in ${decision.latencyMs.toFixed(2)}ms`
+            `${state.symbol}: p=${f6(decision.calibratedScore)}${
+              state.confidenceDelta !== 0
+                ? ` ${state.confidenceDelta > 0 ? '+' : ''}${f6(state.confidenceDelta)} memory -> ${f6(adjusted)}`
+                : ''
+            } (${decision.choiceAction}) in ${decision.latencyMs.toFixed(2)}ms`
         );
 
         return {
-          system1Approved: decision.noulExecute,
-          aiConfidence: decision.calibratedScore,
+          system1Approved: approved,
+          aiConfidence: adjusted,
           recommendedStartLeverage: decision.recommendedLeverage,
-          vetoReason: decision.noulExecute
+          vetoReason: approved
             ? ''
-            : `System-1 score ${f6(decision.calibratedScore)} < threshold ${f6(
-                this.styleParams.minAiConfidenceScore
-              )}`,
+            : state.confidenceDelta < 0
+              ? `Shared memory veto: ${state.lessonGuidance}`
+              : `System-1 score ${f6(adjusted)} < threshold ${f6(
+                  this.styleParams.minAiConfidenceScore
+                )}`,
         };
       })
       .addNode('leverageArchitect', async (state) => {
@@ -265,18 +344,26 @@ export class AiAgentClubOrchestrator {
             summaryNote: state.vetoReason || 'Filtered by AI Club',
           };
         }
-        // Always start from 10x (and let execution ladder escalate 10x->11x->12x->13x->14x->15x if needed!)
-        const startLev = clamp(this.styleParams.minLeverage, 10, 15);
+        // System-1's recommendation sets the ladder start; it is the minimum
+        // leverage that clears Binance MIN_NOTIONAL, never a risk escalation.
+        const startLev = clamp(
+          Math.round(state.recommendedStartLeverage),
+          Math.round(this.styleParams.minLeverage),
+          Math.round(this.styleParams.maxLeverage)
+        );
         this.touchAgent(
           'leverage-architect',
-          `${state.symbol}: Approved $2.000000 margin | Ladder ${startLev}x→15x armed`
+          `${state.symbol}: Approved $${f6(this.styleParams.baseMarginUsd)} margin | Ladder ${startLev}x→${
+            this.styleParams.maxLeverage
+          }x armed`
         );
         return {
           recommendedStartLeverage: startLev,
-          summaryNote: `AI Club Consensus PASS (score=${f6(state.aiConfidence)})`,
+          summaryNote: `AI Club Consensus PASS (score=${f6(state.aiConfidence)}, start ${startLev}x)`,
         };
       })
-      .addEdge(START, 'alphaScout')
+      .addEdge(START, 'sharedMemoryRecall')
+      .addEdge('sharedMemoryRecall', 'alphaScout')
       .addEdge('alphaScout', 'microStructureSniper')
       .addEdge('microStructureSniper', 'system1Judge')
       .addEdge('system1Judge', 'leverageArchitect')
@@ -358,11 +445,11 @@ export class AiAgentClubOrchestrator {
           mfeCaptureRatio: mfeRatio,
         };
       })
-      .addNode('styleMutation', async (state) => {
-        const changes: Array<{ param: string; before: number; after: number; reason: string }> = [];
+      .addNode('improvementDraft', async (state) => {
+        const proposals: MutationProposal[] = [];
         const p = this.styleParams;
 
-        const recordMut = (
+        const propose = (
           key: keyof AdaptiveStyleParams,
           nextVal: number,
           minV: number,
@@ -372,13 +459,12 @@ export class AiAgentClubOrchestrator {
           const before = p[key];
           const clamped = Number(clamp(nextVal, minV, maxV).toFixed(6));
           if (Math.abs(clamped - before) >= 0.005) {
-            p[key] = clamped;
-            changes.push({ param: key, before, after: clamped, reason });
+            proposals.push({ param: key, target: clamped, min: minV, max: maxV, reason });
           }
         };
 
         if (state.verdict === 'WIN_EARLY_TRAIL') {
-          recordMut(
+          propose(
             'trailingCallbackRoiPct',
             p.trailingCallbackRoiPct - 0.06,
             0.65,
@@ -387,15 +473,15 @@ export class AiAgentClubOrchestrator {
           );
         } else if (state.verdict === 'WIN_OPTIMAL') {
           // Slight confidence relaxation when sniper hits clean winners so we capture steady flow
-          recordMut(
+          propose(
             'minAiConfidenceScore',
             p.minAiConfidenceScore - 0.008,
-            0.50,
+            0.5,
             0.74,
             'Reward high-accuracy regime while preserving selectivity'
           );
         } else if (state.verdict === 'FEE_DRAG_BREAKEVEN') {
-          recordMut(
+          propose(
             'trailingFloorRoiPct',
             p.trailingFloorRoiPct + 0.12,
             3.4,
@@ -403,7 +489,7 @@ export class AiAgentClubOrchestrator {
             'Elevate minimum locked trailing floor above round-trip Binance taker fees'
           );
         } else if (state.verdict === 'LOSS_PREMATURE_PULLBACK') {
-          recordMut(
+          propose(
             'minOrderflowDeltaRatio',
             p.minOrderflowDeltaRatio + 0.04,
             1.08,
@@ -411,7 +497,7 @@ export class AiAgentClubOrchestrator {
             'Require stronger aggTrade buyer/seller delta confirmation on 15s reversal bar'
           );
           if (state.side === 'LONG') {
-            recordMut(
+            propose(
               'pullbackRsiLongMax',
               p.pullbackRsiLongMax - 1.0,
               40.0,
@@ -419,7 +505,7 @@ export class AiAgentClubOrchestrator {
               'Wait for deeper 15s RSI cooldown on LONG pullbacks'
             );
           } else {
-            recordMut(
+            propose(
               'pullbackRsiShortMin',
               p.pullbackRsiShortMin + 1.0,
               42.0,
@@ -427,16 +513,16 @@ export class AiAgentClubOrchestrator {
               'Wait for higher 15s RSI relief bounce on SHORT pullbacks'
             );
           }
-          recordMut(
+          propose(
             'minAiConfidenceScore',
             p.minAiConfidenceScore + 0.015,
-            0.50,
+            0.5,
             0.74,
             'Increase System-1 probability gate after premature entry loss'
           );
         } else if (state.verdict === 'LOSS_MOMENTUM_REVERSAL') {
           if (state.features.absChange24hPct > 55) {
-            recordMut(
+            propose(
               'max24hOverextensionPct',
               p.max24hOverextensionPct - 2.5,
               45.0,
@@ -444,13 +530,70 @@ export class AiAgentClubOrchestrator {
               'Filter exhausted extreme 24h movers prone to violent mean-reversion'
             );
           }
-          recordMut(
+          propose(
             'minConfirmationBodyRatio',
             p.minConfirmationBodyRatio + 0.02,
             0.28,
             0.58,
             'Demand stronger 15s confirmation candle body conviction'
           );
+        }
+
+        this.touchAgent(
+          'hermes-evolver',
+          `Drafted ${proposals.length} improvement proposal(s) for ${state.verdict} on ${
+            state.symbol
+          }: ${proposals.map((pr) => pr.param).join(', ') || 'none'}`
+        );
+
+        return {
+          proposals,
+          lessonKey: lessonKey(state.side, state.features),
+        };
+      })
+      .addNode('councilVote', async (state) => {
+        const ctx: CouncilContext = {
+          params: this.styleParams,
+          verdict: state.verdict,
+          side: state.side,
+          patterns: this.getLessonPatterns(),
+          lessonKey: state.lessonKey,
+          recentLessons: this.lessons,
+        };
+        const ballots = castBallots(state.proposals, ctx);
+
+        for (const b of ballots) {
+          for (const v of b.votes) {
+            this.touchAgent(v.agent, `${v.vote} ${b.change} — ${v.why}`.slice(0, 200));
+          }
+        }
+
+        const approvedCount = ballots.filter((b) => b.approved).length;
+        this.touchAgent(
+          'system1-judge',
+          `Council tallied ${ballots.length} ballot(s) on ${state.symbol}: ${approvedCount} approved, ${
+            ballots.length - approvedCount
+          } rejected by vote`.slice(0, 200)
+        );
+
+        return { ballots };
+      })
+      .addNode('applyConsensus', async (state) => {
+        const changes: Array<{ param: string; before: number; after: number; reason: string }> = [];
+
+        for (const b of state.ballots) {
+          if (!b.approved) continue;
+          const prop = state.proposals.find((pr) => pr.param === b.param);
+          if (!prop) continue;
+          const before = this.styleParams[prop.param];
+          const after = Number(clamp(prop.target, prop.min, prop.max).toFixed(6));
+          this.styleParams[prop.param] = after;
+          changes.push({
+            param: prop.param,
+            before,
+            after,
+            reason: `${prop.reason} [${b.forCount}/${b.votes.length} council votes]`,
+          });
         }
 
         return { mutations: changes };
@@ -478,8 +621,10 @@ export class AiAgentClubOrchestrator {
         return { brierLoss };
       })
       .addEdge(START, 'forensicAuditor')
-      .addEdge('forensicAuditor', 'styleMutation')
-      .addEdge('styleMutation', 'rlcdCalibration')
+      .addEdge('forensicAuditor', 'improvementDraft')
+      .addEdge('improvementDraft', 'councilVote')
+      .addEdge('councilVote', 'applyConsensus')
+      .addEdge('applyConsensus', 'rlcdCalibration')
       .addEdge('rlcdCalibration', END);
 
     return graph.compile();
@@ -495,12 +640,19 @@ export class AiAgentClubOrchestrator {
     confidence: number;
     recommendedStartLeverage: number;
     reason: string;
+    lessonKey: string;
+    lessonGuidance: string;
   }> {
     const out = await this.compiledEntryGraph.invoke({
       symbol: params.symbol,
       side: params.side,
       features: params.features,
       minNotional: params.minNotional,
+      lessonKey: '',
+      lessonGuidance: '',
+      lessonSamples: 0,
+      lessonWinRatePct: 0,
+      confidenceDelta: 0,
       regimeApproved: false,
       sniperApproved: false,
       system1Approved: false,
@@ -519,7 +671,14 @@ export class AiAgentClubOrchestrator {
       confidence: Number(out.aiConfidence ?? 0.5),
       recommendedStartLeverage: Number(out.recommendedStartLeverage ?? 10),
       reason: out.summaryNote || out.vetoReason || 'Evaluated',
+      lessonKey: String(out.lessonKey ?? ''),
+      lessonGuidance: String(out.lessonGuidance ?? ''),
     };
+  }
+
+  /** Called once per closed trade so every agent can read this outcome on the next candidate. */
+  public absorbLesson(lesson: TradeLesson) {
+    this.lessons = prependLesson(this.lessons, lesson);
   }
 
   public async runTradePostMortem(params: {
@@ -537,14 +696,18 @@ export class AiAgentClubOrchestrator {
   }): Promise<{
     analysis: AiPostMortemAnalysis;
     mutationRecord: StyleMutationRecord | null;
+    lesson: TradeLesson;
   }> {
     const out = await this.compiledPostMortemGraph.invoke({
       ...params,
+      lessonKey: '',
       verdict: 'WIN_OPTIMAL',
       whatWorkedBest: '',
       whatWeMissed: '',
       mfeCaptureRatio: 0,
       brierLoss: 0,
+      proposals: [],
+      ballots: [],
       mutations: [],
     });
 
@@ -553,6 +716,16 @@ export class AiAgentClubOrchestrator {
         `${m.param}: ${f6(m.before)} → ${f6(m.after)} (${m.reason})`
     );
 
+    const ballots: Ballot[] = out.ballots || [];
+    const ctx: CouncilContext = {
+      params: this.styleParams,
+      verdict: out.verdict,
+      side: params.side,
+      patterns: this.getLessonPatterns(),
+      lessonKey: out.lessonKey || lessonKey(params.side, params.features),
+      recentLessons: this.lessons,
+    };
+
     const analysis: AiPostMortemAnalysis = {
       verdict: out.verdict,
       whatWorkedBest: out.whatWorkedBest,
@@ -560,10 +733,24 @@ export class AiAgentClubOrchestrator {
       styleAdjustments,
       mfeCaptureRatio: out.mfeCaptureRatio,
       brierLoss: out.brierLoss,
-      agentConsensusSummary: `Hermes Evolver + System-1 RLCD updated (#${
+      councilBallots: ballots,
+      nextStep: nextStepLine(ballots, ctx),
+      agentConsensusSummary: `${consensusLine(ballots)} || RLCD #${
         this.system1Weights.totalUpdates
-      }, EMA Brier=${f6(this.system1Weights.brierScoreEma)}).`,
+      }, EMA Brier=${f6(this.system1Weights.brierScoreEma)}.`,
     };
+
+    const lesson = buildTradeLesson(
+      {
+        closedAt: Date.now(),
+        symbol: params.symbol,
+        side: params.side,
+        netPnl: params.netPnl,
+        entryFeatures: params.features,
+      },
+      analysis
+    );
+    this.absorbLesson(lesson);
 
     let mutationRecord: StyleMutationRecord | null = null;
     if (out.mutations && out.mutations.length > 0) {
@@ -582,14 +769,16 @@ export class AiAgentClubOrchestrator {
       'AI_CLUB',
       `Post-Mortem [${params.symbol} ${params.side}] Verdict=${out.verdict} | NetPNL=$${f6(
         params.netPnl
-      )} | Style Mutations=${out.mutations?.length || 0}`,
+      )} | Council=${ballots.length} ballot(s), ${styleAdjustments.length} applied`,
       {
         whatWorkedBest: out.whatWorkedBest,
         whatWeMissed: out.whatWeMissed,
         styleAdjustments,
+        ballots: ballots.map((b) => `${b.change} -> ${b.approved ? 'FOR' : 'REJECTED'} (${b.forCount}/${b.votes.length})`),
+        nextStep: analysis.nextStep,
       }
     );
 
-    return { analysis, mutationRecord };
+    return { analysis, mutationRecord, lesson };
   }
 }

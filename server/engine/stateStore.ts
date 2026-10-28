@@ -7,9 +7,11 @@ import type {
   LocalDecisionConfig,
   StyleMutationRecord,
   System1Weights,
+  TradeLesson,
 } from '../types.js';
 import { createDefaultStyleParams } from '../ai/agentClubGraph.js';
 import { createDefaultSystem1Weights } from '../ai/system1Primitives.js';
+import { prependLesson } from '../ai/lessonMemory.js';
 import { decryptSecret, encryptSecret } from '../utils/cryptoVault.js';
 
 export interface PersistedPositionMeta {
@@ -19,6 +21,21 @@ export interface PersistedPositionMeta {
   peakRoiPct: number;
   worstRoiPct: number;
   entryFeatures?: EntryFeatureVector;
+}
+
+export interface PersistedIncomeLedger {
+  sinceMs: number;
+  cursorMs: number;
+  fundingFeeTotal: number;
+  commissionTotal: number;
+  realizedPnlTotal: number;
+  otherIncomeTotal: number;
+  fundingBySymbol: Record<string, number>;
+  recordCount: number;
+  lastSyncAt: number;
+  available: boolean;
+  status: string;
+  seenTranIds: number[];
 }
 
 interface RawVaultData {
@@ -38,6 +55,8 @@ interface RawVaultData {
   lossCount: number;
   realizedNetPnlTotal: number;
   openPositionMeta: Record<string, PersistedPositionMeta>;
+  incomeLedger: PersistedIncomeLedger;
+  lessons: TradeLesson[];
 }
 
 export class StateStore {
@@ -74,6 +93,21 @@ export class StateStore {
       lossCount: 0,
       realizedNetPnlTotal: 0,
       openPositionMeta: {},
+      incomeLedger: {
+        sinceMs: 0,
+        cursorMs: 0,
+        fundingFeeTotal: 0,
+        commissionTotal: 0,
+        realizedPnlTotal: 0,
+        otherIncomeTotal: 0,
+        fundingBySymbol: {},
+        recordCount: 0,
+        lastSyncAt: 0,
+        available: false,
+        status: 'Not synced yet',
+        seenTranIds: [],
+      },
+      lessons: [],
     };
   }
 
@@ -93,6 +127,8 @@ export class StateStore {
           ...(parsed.localDecisionConfig || {}),
         },
         openPositionMeta: parsed.openPositionMeta || {},
+        incomeLedger: { ...def.incomeLedger, ...(parsed.incomeLedger || {}) },
+        lessons: Array.isArray(parsed.lessons) ? parsed.lessons : [],
       };
     } catch {
       return def;
@@ -247,6 +283,28 @@ export class StateStore {
     this.data.realizedNetPnlTotal += trade.netPnl;
     this.data.styleParams = updatedStyle;
     this.data.system1Weights = updatedWeights;
+    this.save();
+  }
+
+  public getIncomeLedger(): PersistedIncomeLedger {
+    return this.data.incomeLedger;
+  }
+
+  public updateIncomeLedger(patch: Partial<PersistedIncomeLedger>) {
+    this.data.incomeLedger = { ...this.data.incomeLedger, ...patch };
+    this.save();
+  }
+
+  public getClosedTradeHistory(): ClosedTradeRecord[] {
+    return this.data.closedTrades;
+  }
+
+  public getLessons(): TradeLesson[] {
+    return this.data.lessons;
+  }
+
+  public recordLesson(lesson: TradeLesson) {
+    this.data.lessons = prependLesson(this.data.lessons, lesson);
     this.save();
   }
 

@@ -17,6 +17,9 @@ import { AiAgentClubOrchestrator } from '../ai/agentClubGraph.js';
 import { StateStore } from './stateStore.js';
 import { MarketScanner40 } from './marketScanner.js';
 import { RestMarketFeed } from './restMarketFeed.js';
+import { IncomeLedger } from './incomeLedger.js';
+import { buildPnlLedger } from './pnlLedger.js';
+import { aggregateLessonPatterns } from '../ai/lessonMemory.js';
 import { PositionMonitor1s } from './positionMonitor1s.js';
 import { evaluate15sPullbackStrategy } from './strategy15s.js';
 import { f6, formatOrderQty, maskApiKey } from '../utils/format.js';
@@ -35,6 +38,7 @@ export class HftBotEngine {
   );
   public readonly scanner: MarketScanner40;
   public readonly restMarketFeed: RestMarketFeed;
+  public readonly incomeLedger: IncomeLedger;
   public readonly positionMonitor: PositionMonitor1s;
   public readonly aiClub: AiAgentClubOrchestrator;
 
@@ -70,11 +74,13 @@ export class HftBotEngine {
   constructor() {
     this.scanner = new MarketScanner40(this.restClient, this.wsManager, this.candleBuilder);
     this.restMarketFeed = new RestMarketFeed(this.restClient, this.wsManager, this.candleBuilder);
+    this.incomeLedger = new IncomeLedger(this.restClient, this.stateStore);
     this.positionMonitor = new PositionMonitor1s(this.stateStore);
     this.aiClub = new AiAgentClubOrchestrator({
       styleParams: this.stateStore.getStyleParams(),
       system1Weights: this.stateStore.getSystem1Weights(),
       localConfig: this.stateStore.getLocalDecisionConfig(),
+      lessons: this.stateStore.getLessons(),
     });
 
     this.engineRunning = this.stateStore.getEngineRunning();
@@ -137,6 +143,10 @@ export class HftBotEngine {
 
     // 3. Attempt initial exchange metadata + account sync
     await this.bootstrapBinanceConnectivity();
+
+    // Pull the settled income ledger before the first snapshot goes out. Throttled
+    // internally, so the 1s heartbeat can call it freely afterwards.
+    await this.incomeLedger.sync(true);
 
     // 4. Start exact 1-second real-time loop
     if (!this.mainLoopTimer) {
@@ -361,6 +371,8 @@ export class HftBotEngine {
       if (this.tickCounter % 3 === 0) {
         await this.syncAccountSummaryOnly();
       }
+      // Settled income (real commissions + funding) refreshes once a minute.
+      this.incomeLedger.sync().catch(() => {});
     }
 
     // Tick running time & live WS mark prices every single second
@@ -555,20 +567,32 @@ export class HftBotEngine {
       return;
     }
 
+    // Log what the shared memory contributed to this approval, so a lesson that
+    // changed an entry decision is visible in the tape rather than implied.
+    if (consensus.lessonKey) {
+      logger.ai('AI_CLUB', `Shared memory [${consensus.lessonKey}]: ${consensus.lessonGuidance}`);
+    }
+
     // Re-check 95% capital ceiling right before order placement
     if (this.isMarginExhausted95()) return;
 
-    await this.executeEntryWithLeverageLadder(symbol, side, stratEval.features);
+    await this.executeEntryWithLeverageLadder(
+      symbol,
+      side,
+      stratEval.features,
+      consensus.recommendedStartLeverage
+    );
   }
 
   /**
    * Executes trade with $2.000000 base margin and sequential leverage fallback:
-   * Try 10x -> if failed try 11x -> 12x -> 13x -> 14x -> max 15x!
+   * Start from the leverage System-1 says clears MIN_NOTIONAL, then step upward to 15x!
    */
   private async executeEntryWithLeverageLadder(
     symbol: string,
     side: 'LONG' | 'SHORT',
-    features: EntryFeatureVector
+    features: EntryFeatureVector,
+    startLeverage: number
   ) {
     if (this.openingInFlight.has(symbol)) return;
     this.openingInFlight.add(symbol);
@@ -587,7 +611,12 @@ export class HftBotEngine {
     const positionSide: 'BOTH' | 'LONG' | 'SHORT' = this.hedgeMode ? side : 'BOTH';
 
     try {
-      const ladder = [10, 11, 12, 13, 14, 15];
+      const first = Math.min(
+        Math.max(Math.round(startLeverage), Math.round(style.minLeverage)),
+        Math.round(style.maxLeverage)
+      );
+      const ladder: number[] = [];
+      for (let lev = first; lev <= style.maxLeverage; lev++) ladder.push(lev);
       let lastErrorMsg = '';
 
       for (const lev of ladder) {
@@ -797,7 +826,7 @@ export class HftBotEngine {
       leverageUsed: pos.leverage,
     };
 
-    const { analysis, mutationRecord } = await this.aiClub.runTradePostMortem({
+    const { analysis, mutationRecord, lesson } = await this.aiClub.runTradePostMortem({
       symbol: pos.symbol,
       side: pos.side,
       netPnl,
@@ -840,6 +869,7 @@ export class HftBotEngine {
       this.aiClub.getStyleParams(),
       this.aiClub.getSystem1Weights()
     );
+    this.stateStore.recordLesson(lesson);
 
     logger.success(
       'EXECUTION',
@@ -849,6 +879,7 @@ export class HftBotEngine {
         finalRoiPct
       )}% | Time: ${f6(durationSec)}s`
     );
+    logger.ai('AI_CLUB', `Council next step: ${analysis.nextStep}`);
   }
 
   public getSnapshot(): DashboardSnapshot {
@@ -870,6 +901,13 @@ export class HftBotEngine {
     const marginFull = this.isMarginExhausted95();
     let scannerState: ScannerOperatingState = 'ACTIVE_SCANNING';
     let scannerPauseReason: string | null = null;
+
+    // Ledger covers EVERY trade the engine ever closed, not just the last 40 shown.
+    const history = this.stateStore.getClosedTradeHistory();
+    const botSymbols = new Set<string>(history.map((t) => t.symbol));
+    for (const p of openPositions) botSymbols.add(p.symbol);
+    const lessons = this.stateStore.getLessons();
+    const pnlLedger = buildPnlLedger(history, this.incomeLedger.getSummary(botSymbols));
 
     if (!this.rateGovernor.wsConnected && positive.length === 0 && negative.length === 0) {
       scannerState = 'DISCONNECTED';
@@ -926,6 +964,10 @@ export class HftBotEngine {
       lossCount: stats.lossCount,
       winRatePct: stats.winRatePct,
       realizedNetPnlTotal: stats.realizedNetPnlTotal,
+
+      pnlLedger,
+      lessons,
+      lessonPatterns: aggregateLessonPatterns(lessons),
 
       rateTelemetry: this.rateGovernor.getTelemetry(),
       ipReport: this.ipReport,

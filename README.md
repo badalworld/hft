@@ -3,7 +3,7 @@
 
   <br />
 
-  [![Version](https://img.shields.io/badge/Version-1.2.0-6B403C?style=for-the-badge)](#whats-new-in-v120)
+  [![Version](https://img.shields.io/badge/Version-1.3.0-6B403C?style=for-the-badge)](#whats-new-in-v130)
   [![Exchange](https://img.shields.io/badge/Exchange-Binance%20Portfolio%20Margin%20(UM)-F0B90B?style=for-the-badge)](https://www.binance.com/en/futures)
   [![Execution](https://img.shields.io/badge/Execution-15s%20Candles%20%7C%201s%20Monitor-ADEBB3?style=for-the-badge)](#6-real-time-15-second-candle-engine--pullback-strategy)
   [![Transport](https://img.shields.io/badge/Transport-WebSocket%20%2B%20Auto%20REST%20Failover-8FD6FF?style=for-the-badge)](#4-market-data-transport-resilience-ws--rest-failover)
@@ -25,9 +25,27 @@
 
 ---
 
-## What's New in `v1.2.0`
+## What's New in `v1.3.0`
 
-**The bot now trades when the network won't cooperate.** Version 1.2.0 closes the gap between *"connected"* and *"actually receiving data"* — the failure mode that silently reduces any tick-driven strategy to a zero-trade treadmill.
+**The bot now knows what it earned, remembers what it learned, and never leaves a cooled asset in the way.** Version 1.3.0 adds the settled-outcome layer the strategy was missing: real exchange income, a per-close PNL chart, shared memory between agents, and a council that has to agree before it touches a parameter.
+
+| Change | Detail |
+| :--- | :--- |
+| **PNL Ledger — "The Trellis"** | New `PNL Ledger` switch in the header opens `src/components/PnlLedgerModal.tsx`: a hand-rolled SVG chart (no chart library added to the bundle) with one hairline stem per settled close, separate `LONG` and `SHORT` strands that climb only on their own trades, the portfolio strand in cream, and a brass rule at zero. Every close is a focusable, keyboard-reachable node with its own tooltip. Below it, three readout bands — **Volume**, **Accuracy**, **Friction** — carry Total Trades, Long/Short Trade Quantity, Win Trades, Win Rate, Long Win %, Short Win %, Best/Worst Close, **Total Binance Platform Fees**, **Total Funding Fees**, Gross PNL, Net PNL After Fees and Net Including Funding. |
+| **Real settled income, not an estimate** | `server/engine/incomeLedger.ts` polls `/papi/v1/um/income` once a minute (weight `30`) and persists it. `startTime` is inclusive on Binance, so the cursor advances to `newest + 1` and records are de-duplicated by `tranId`. This is the only income route a Portfolio Margin key can use — `/papi/v1/income` is `404` and `/fapi/v1/income` is `-2015`. |
+| **Funding attributed per symbol** | The account contains trades the bot never made. Funding is therefore summed **per symbol the bot actually traded** and shown separately from the account-wide figure, so the ledger can't be quietly contaminated by manual positions. When the income route is unavailable the panel prints `—` and the real error; it never renders a fabricated `+$0.000000`. |
+| **Cooled assets leave the scan list** | A symbol in cooldown used to stay on screen occupying one of the 20 slots while being untradeable. `marketScanner.ts` now drops cooled symbols from the ranked universe and promotes the next-ranked mover into their place, pins any symbol holding an open position so it stays visible, and logs both halves of the swap: *"`X` removed from scan list — cooling for Ns. Slot opened for the next-ranked mover."* / *"`Y` substituted into the scan list, replacing `X`."* The scanner re-ranks the instant the cooling set changes instead of waiting for the 4s refresh. |
+| **Shared memory between agents** | `server/ai/lessonMemory.ts` writes a lesson for every closed trade keyed `SIDE \| RSI band \| DELTA band`, and `sharedMemoryRecall` — the new first node of the entry graph — reads it back before any agent votes. A pattern with ≥4 samples and a win rate under 35% applies a `-0.06` confidence penalty that can **veto an entry the live tape approved**; a proven pattern adds `+0.02`. The recall is logged on the tape, so a decision changed by memory is visible rather than implied. |
+| **A three-seat improvement council** | `server/ai/improvementCouncil.ts` replaced "Hermes edits the config". Each drafted parameter change is now balloted by the parameter's owner, by Hermes (verdict coherence + an oscillation guard that refuses to re-loosen what it just tightened), and by a peer who judges only the capital consequence. **Two of three `FOR` votes are required before a parameter moves**, and every ballot records who voted, which way, and why. Rejected proposals are recorded as rejected — they do not silently disappear. |
+| **Two dead-code defects removed** | The MicroStructure Sniper compared orderflow against `minOrderflowDeltaRatio * 0.92`, so it could never veto at the threshold it advertised; it now uses the real value. The System-1 leverage tier collapsed to a constant `10` through a `>= 10 ? 10 : 10` term, so the "volatility tier" was fiction; leverage is now sized by Binance's `MIN_NOTIONAL` against the `$2.000000` margin, and the execution ladder starts where the agent actually recommended instead of a hardcoded `[10,11,…,15]`. |
+| **Self-tests: 5 → 7 groups** | `npm test` now also proves council integrity (approved ballots equal the applied adjustments, every approval carries ≥2 of 3 votes), that shared memory measurably moves the entry gate by exactly `-0.06`, that a cooled symbol is evicted and backfilled by the next-ranked mover and then displaced again on recovery, and the ledger arithmetic over a mixed long/short history. |
+
+> **Verification status, stated separately.** Nothing in this table is claimed from code review. The PNL Ledger, income ledger and funding attribution are live-verified against real settled data on this account, and the shared-memory recall and the council ballot have both ruled in production — five ballots cast, one tightening approved 3/3 and four loosenings rejected 1/3. The scanner substitution is verified by the self-tests and has not yet had a cooled asset to evict on this account. See [§9](#9-zero-cost-self-learning-ai-agent-club) for the ballots and [§2](#2-execution-ledger--live-verified) for the ledger.
+
+<details>
+<summary><b>What's New in <code>v1.2.0</code> — Market data honesty: WS liveness watchdog + auto REST failover</b></summary>
+
+<br />
 
 | Change | Detail |
 | :--- | :--- |
@@ -37,6 +55,8 @@
 | **The candle builder never invents a bar** | Sealing logic used to mint a synthetic flat, zero-volume successor every 15 seconds for every watched symbol. During a feed outage that evicted all real history within `MAX_BARS_PER_SYMBOL` and pinned `RSI(7)` to exactly `50.000000` and the orderflow ratio to exactly `1.000000` across all 40 assets — a mathematically dead universe that could never produce a signal. It now only seals the window that genuinely elapsed and gap-fills on the next real tick. |
 | **Protective hard stop at `-9.500000%` ROI** | Every position carries a catastrophic adverse excursion floor alongside the `+5%` trailing predator, so a runaway move against the trade exits mechanically instead of waiting for the trail. |
 | **`scripts/diagnoseMarketData.ts`** | One command that walks every `fstream.binance.com` edge IP, subscribes to a live stream on each, and reports precisely which stage fails — handshake, `SUBSCRIBE` ACK, or data delivery — then cross-checks REST so you can see the asymmetry. |
+
+</details>
 
 <details>
 <summary><b>What's New in <code>v1.1.0</code> — Portfolio Margin (<code>papi</code>) execution support</b></summary>
@@ -85,20 +105,44 @@ Every claim below was observed on a live, armed, real-money session — not asse
 | Claim | Evidence |
 | :--- | :--- |
 | **Real orders reach production Binance** | Engine placed `BANKUSDT` `3589019958`, `NILUSDT` `1883047383`, `CAPUSDT` `686718001`, `ONUSDT` `1499115384` within ~70s of arming. |
-| **Full round trips open, manage and close** | 9 completed round trips across `NILUSDT`, `FIGHTUSDT`, `INITUSDT`, `BANKUSDT`, `CAPUSDT`, `EVAAUSDT`, `BLESSUSDT`; 6 open concurrently at peak. |
-| **Both exit paths fire** | 7 closes via `TRAILING_STOP_HIT`, 2 via `PROTECTIVE_STOP_LOSS` — the profit predator and the risk guardrail are both live code, not dead branches. |
+| **Full round trips open, manage and close** | 44 completed round trips across 20 distinct symbols (`ONUSDT`, `XANUSDT`, `TAGUSDT`, `FIGHTUSDT`, `BANKUSDT`, `NILUSDT`, `CAPUSDT`, `BLESSUSDT`, …); 6 open concurrently at peak. |
+| **Both exit paths fire** | 29 closes via `TRAILING_STOP_HIT`, 15 via `PROTECTIVE_STOP_LOSS` — the profit predator and the risk guardrail are both live code, not dead branches. |
 | **PNL is fee-aware, not gross-fiction** | Net PNL booked after real `/papi/v1/um/commissionRate` taker fees on both legs. One trade exposed the difference exactly: `+0.013476` gross, `0.020055` fees, **`-0.006579` net** — verdict `FEE_DRAG_BREAKEVEN`. |
 | **The 95% capital cap engages and halts entries** | Scanner reached `PAUSED_MARGIN_FULL` at `85.769063%` pool utilization, stopped opening new trades, and kept managing the live ones. |
 | **Strategy logic is genuinely varied, not degenerate** | Across the 40-asset scanner, sampled three times consecutively and stable: `rsi15s` → **39 distinct values**, `pullbackDepthPct` → 40, `orderflowDeltaRatio` → 37, `candleCount15s` → 29, and **zero** assets pinned at the degenerate `50.000000`. Stages observed: `COOLDOWN`, `MONITORING`, `PULLBACK_DETECTED`, `CONFIRMED_SIGNAL`, `IN_POSITION`. |
 | **Self-heals a blocked WebSocket** | REST feed engaged with no operator action and restored candle diversity from the flat `79 / 50.000000 / 0 / 1.000000` dead state. Currently running in fallback — `wsConnected: false`, weight `1,036 / 2,400` — and the strategy is still producing varied, actionable diagnostics on all 40 assets. |
-| **AI Club genuinely learns** | 9 consecutive post-mortems, each emitting a real style mutation and a real Brier loss. `minAiConfidenceScore` walked `0.560 → 0.552 → 0.544 → 0.536 → 0.551 → 0.566` across the run, and after two premature-entry losses Hermes tightened three gates at once — `minOrderflowDeltaRatio 1.180 → 1.220`, `pullbackRsiShortMin 48 → 49`, `minAiConfidenceScore 0.536 → 0.551` — then raised `trailingFloorRoiPct 3.650 → 3.770` in response to the fee-drag breakeven. EMA Brier tracked live: `0.163576 → 0.147433 → 0.133329 → … → 0.287577`. |
-| **Type-safe & verified** | `npm run typecheck` → exit 0. All 5 self-test suites → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
+| **AI Club genuinely learns** | 39 consecutive post-mortems, 37 persisted style mutations, each recording the parameter and its value before and after. `minAiConfidenceScore` walked `0.560 → 0.552 → 0.544 → 0.536 → 0.551 → 0.566` across the run, and after two premature-entry losses Hermes tightened three gates at once — `minOrderflowDeltaRatio 1.180 → 1.220`, `pullbackRsiShortMin 48 → 49`, `minAiConfidenceScore 0.536 → 0.551` — then raised `trailingFloorRoiPct 3.650 → 3.770` in response to the fee-drag breakeven. |
+| **Type-safe & verified** | `npm run typecheck` → exit 0. All 7 self-test suites → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
 
 ---
 
 ## 2. Execution Ledger — Live Verified
 
-All 9 completed round trips from one continuous live session, in close order. These are the exact numbers the dashboard rendered.
+### Cumulative live ledger
+
+Every round trip the engine has settled on a funded, armed session, read straight from `snapshot.pnlLedger.stats` (the same numbers the **PNL Ledger** panel renders):
+
+Captured live from `snapshot.pnlLedger.stats` at `2026-10-28T21:35:46Z` — the same numbers the **PNL Ledger** panel renders. It moves with every close; the panel is always current.
+
+| Readout | Value |
+| :--- | ---: |
+| Total trades | `44` |
+| Win trades / loss trades | `27` / `17` |
+| **Win rate** | `61.363636%` |
+| Long quantity / win rate | `39` / `64.102564%` |
+| Short quantity / win rate | `5` / `40.000000%` |
+| Gross PNL | `-$0.085683` |
+| Total Binance platform fees | `-$0.885331` |
+| Funding fees settled on bot symbols | `$0.000000` |
+| **Net PNL after fees** | **`-$0.971014`** |
+| Best / worst close (net) | `+$0.258004` / `-$0.260340` |
+| Avg win / avg loss (net) | `+$0.091588` / `-$0.202582` |
+
+> **Read this honestly.** Win rate and net PNL disagree, and the reason is in the last two rows: the average loss is `2.2×` the average win. Being right 61 times in 100 does not pay for a `-$0.202582` average loser next to a `+$0.091588` average winner. The table is an accounting record, not a performance claim — strategy edge remains an open question, and fees alone (`$0.885331`) are more than `10×` the entire gross result.
+
+### First continuous session, in close order
+
+These are the exact numbers the dashboard rendered for the initial 9-trade session.
 
 | # | Symbol / Side | Entry → Exit | Gross | Fees | **Net** | Peak ROI | ROI @ Close | Duration | Exit Reason |
 | :-- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
@@ -347,18 +391,61 @@ Built on **`@langchain/langgraph`** (`server/ai/agentClubGraph.ts`) + **System-1
 
 ### The 5 Specialized Agents
 1. **Alpha Scout** (*LangGraph + CrewAI Role*): Screens 24h momentum regime quality and filters extreme blow-off overextensions.
-2. **MicroStructure Sniper** (*LangGraph + Agent-Zero Pattern*): Verifies 15s candle pullback depth, `RSI(7)`, wick rejection, and `aggTrade` buyer/seller delta conviction.
-3. **System-1 Decision Gate** (*Nimble / Laya / Kev Architecture*): Executes single-pass typed `noul` (yes/no), `choice`, and temperature-scaled `score` probability decisions in `<0.3ms` locally.
-4. **Leverage & Margin Architect** (*LangGraph + AutoGen Verifier*): Enforces the `$2.000000` margin rule, `95.000000%` equity pool cap, and arms the `10x → 15x` escalation ladder.
+2. **MicroStructure Sniper** (*LangGraph + Agent-Zero Pattern*): Verifies 15s candle pullback depth, `RSI(7)`, wick rejection, and `aggTrade` buyer/seller delta conviction against the **live** `minOrderflowDeltaRatio` — no hidden slack factor, so the threshold it quotes is the threshold it enforces.
+3. **System-1 Decision Gate** (*Nimble / Laya / Kev Architecture*): Executes single-pass typed `noul` (yes/no), `choice`, and temperature-scaled `score` probability decisions in `<0.3ms` locally, then has the result adjusted by shared memory before the gate is re-evaluated.
+4. **Leverage & Margin Architect** (*LangGraph + AutoGen Verifier*): Enforces the `$2.000000` margin rule and the `95.000000%` equity pool cap, and its recommended starting leverage is the rung the execution ladder actually begins on.
 5. **Hermes Post-Mortem Evolver** (*LangGraph + Hermes Self-Evolution*): Runs automatically after **every closed trade (Win or Loss)**:
    - Audits **Maximum Favorable Excursion (MFE)** vs **Maximum Adverse Excursion (MAE)** and **Binance Fee Drag**.
    - Generates a human-readable forensic report (*What Worked Best* & *What We Missed*).
-   - Updates live strategy parameters (`trailingCallbackRoiPct`, `trailingFloorRoiPct`, `pullbackRsiLongMax`, `pullbackRsiShortMin`, `minOrderflowDeltaRatio`, `minAiConfidenceScore`, `max24hOverextensionPct`) and updates System-1 weights via **Strictly Proper Brier Score Online Gradient Descent (RLCD)**.
-   - Appends real contrastive training pairs to `./data/nimble_kev_training_pairs.jsonl`.
+   - Drafts parameter mutations, which the council below must approve before anything changes.
+   - Updates System-1 weights via **Strictly Proper Brier Score Online Gradient Descent (RLCD)** and appends real contrastive training pairs to `./data/nimble_kev_training_pairs.jsonl`.
 
-### It is learning, in production, right now
+### They share what they learn (`server/ai/lessonMemory.ts`)
 
-This is not a demo mode. From the verified session in [§2](#2-execution-ledger--live-verified), Hermes ran on both closed trades, produced a real MFE capture ratio (`0.83997037` on `FIGHTUSDT`), mutated the live style parameter set, and wrote the contrastive pairs to the journal — all at `$0.00` inference cost, with the entry feature snapshot (`orderflowDeltaRatio`, `rsi15s`, `pullbackDepthPct`) captured at the moment of entry so the post-mortem compares against the *decision input*, not the current market. Inspect the live mutated values any time in `snapshot.styleParams`.
+Entry is now a six-node graph: `START → sharedMemoryRecall → alphaScout → microStructureSniper → system1Judge → leverageArchitect → END`. Every closed trade writes a lesson keyed `SIDE | RSI band | DELTA band`; every candidate reads that band back before it is judged.
+
+- A pattern with **≥4 samples and a win rate under 35%** applies a `-0.06` confidence penalty — enough to veto an entry the live tape approved. The veto is logged as `Shared memory veto: HISTORICAL BLEED on …`.
+- A pattern with **≥4 samples, ≥65% win rate and positive net** adds `+0.02`.
+- With no history, the agent says so plainly: *"No shared memory for `<key>` yet — deciding on live tape only."*
+
+The delta is bounded on purpose. Memory nudges a decision; it does not get to run the book.
+
+### Nothing changes without a vote (`server/ai/improvementCouncil.ts`)
+
+Post-mortem is now `forensicAuditor → improvementDraft → councilVote → applyConsensus → rlcdCalibration`. Each drafted mutation is balloted by three named seats:
+
+| Seat | Who | What they are allowed to care about |
+| :--- | :--- | :--- |
+| **Owner** | The agent that owns that parameter | Whether the change matches the evidence |
+| **Hermes** | Post-Mortem Evolver | Verdict coherence, plus an **oscillation guard** that refuses to re-loosen a gate it tightened within the last few lessons |
+| **Peer** | The other judge | Only the capital consequence — what this change risks on the next trade |
+
+**Two of three `FOR` votes are required before a parameter moves.** Rejected proposals stay on the record as rejected, each vote carries its reason, and the whole ballot is written into the trade's post-mortem so the discussion can be read back per trade in the AI Club panel. Loosening a gate additionally requires earned evidence (`looseningIsEarned`: ≥4 samples, ≥60% win rate, positive net) — a single lucky trade cannot relax the system.
+
+### What the loop has actually produced so far
+
+This is not a demo mode, and the artifacts are inspectable on disk rather than asserted here. From the live session in [§2](#2-execution-ledger--live-verified):
+
+- **44 of 44** settled closes carry a real post-mortem (`verdict`, `whatWorkedBest`, `whatWeMissed`, `styleAdjustments`, `mfeCaptureRatio`, `brierLoss`).
+- **38 style mutations** are appended to the persistent ledger — each records the parameter, its value before, its value after, and the trade that justified it. `trailingFloorRoiPct` `3.650000 → 3.770000`, `minAiConfidenceScore` `0.544 → 0.536`, `max24hOverextensionPct → 82.500000` are live values, not defaults.
+- **44 contrastive training pairs** written to `./data/nimble_kev_training_pairs.jsonl`, with the entry feature snapshot (`orderflowDeltaRatio`, `rsi15s`, `pullbackDepthPct`) captured at the moment of entry so the post-mortem compares against the *decision input*, not the current market.
+- All of it at **`$0.00` inference cost** — no LLM call is made on either path. Inspect the mutated set any time in `snapshot.styleParams`.
+
+### The council has ruled in production
+
+Every post-mortem taken since `v1.3.0` shipped has produced a ballot — **five cast, one approved and four rejected** — and the split is the whole design argument:
+
+| Settled trade | Proposal | Verdict |
+| :--- | :--- | :--- |
+| `FIGHTUSDT` `LONG` `-$0.061465` | `minConfirmationBodyRatio 0.480000 → 0.500000` | **APPROVED 3/3** — a tightening, unanimously |
+| `XANUSDT` `LONG` `+$0.159581` | `minAiConfidenceScore 0.536000 → 0.528000` | **REJECTED 1/3** |
+| `TAGUSDT` `LONG` `+$0.258004` | `minAiConfidenceScore 0.536000 → 0.528000` | **REJECTED 1/3** |
+| `IDOLUSDT` `LONG` `+$0.085263` | `minAiConfidenceScore 0.536000 → 0.528000` | **REJECTED 1/3** |
+| `XANUSDT` `LONG` `+$0.099284` | `minAiConfidenceScore 0.536000 → 0.528000` | **REJECTED 1/3** |
+
+Four winning trades each drafted a **loosening** of the entry gate, and the council refused all four. The only proposal that passed was the losing trade's **tightening**. The System-1 judge's recorded reason is the design in one line: *"Refusing to loosen my own guard — history says otherwise."* A profitable trade does not get to relax the system.
+
+Shared memory is feeding those votes. `snapshot.lessonPatterns` holds the aggregated per-setup history (a band like `LONG | RSI55+ | DELTA 1.50+` with its sample count, win rate and cumulative net), and the recall is visible on the entry tape — Alpha Scout's live log line reads `STARUSDT (LONG): 24h Δ 7.880000% → REGIME_PASS | Hermes: LONG | RSI55+ | DELTA 1.50+ 50.000000 win / 2 trades`. Agents are quoting each other's closed-trade history at the moment of entry, not just at post-mortem. Read the live bands in the **AI Club → Shared Memory** panel; they change with every settled close.
 
 ---
 
@@ -372,8 +459,26 @@ Designed around a clean, focused hardware console aesthetic paired with the **Lo
 | **Lotus Coral Petal** | `#FF857A` | `SHORT` badges, Top 20 Negative Movers, Risk/Stop Alerts, `95% Capital Pause` banner, Manual Close |
 | **Lotus Orchid Blossom** | `#EBAEE6` | Brand highlights, Fixed Start Balance lock, `+5.000000%` Trailing Armed glow, AI Agent Club telemetry |
 | **Lotus Rosewood Earth** | `#6B403C` | Brushed rosewood-mahogany skeuomorphic chassis, raised tactile push-buttons, rose-bronze corner rivets |
+| **Ledger Brass** | `#D9A441` | Reserved for the PNL Ledger alone: the zero rule on the Trellis, the fee/funding readouts, and the scanner's substitution chip. One accent, one meaning — money that has actually settled. |
 
-The primary screen remains pure and distraction-free—displaying **only** your **Start Balance**, **Current Equity**, **Open Trades**, and **40-Asset Market Scanner**—while **AI Club**, **System & Error Logs**, and **Vault Settings & Whitelist IPs** open cleanly via physical tactile switches in the header.
+The primary screen remains pure and distraction-free—displaying **only** your **Start Balance**, **Current Equity**, **Open Trades**, and **40-Asset Market Scanner**—while **PNL Ledger**, **AI Club**, **System & Error Logs**, and **Vault Settings & Whitelist IPs** open cleanly via physical tactile switches in the header.
+
+### The Trellis (`PNL Ledger`)
+
+The chart is drawn by hand in SVG — no chart library entered the bundle for it. Its whole job is to answer one question at a glance: *did the closes we already booked make or lose money?*
+
+- **Cream strand** — cumulative net PNL across every settled close.
+- **Mint / orchid strands** — the `LONG` and `SHORT` books climbing only on their own trades, so a side that is quietly bleeding cannot hide inside the portfolio line.
+- **One hairline stem per close**, mint when it added, coral when it subtracted — the size of each individual jump is readable without hovering.
+- **Brass rule at zero** — everything above it is money the account kept.
+- Each node is a focusable `role="listitem"` element with a full `aria-label`, so the ledger is readable by keyboard and by a screen reader, and the draw-in animation is skipped entirely under `prefers-reduced-motion`.
+
+Below the chart, the readouts are grouped by what they measure: **Volume** (Total Trades, Long Trade Quantity, Short Trade Quantity), **Accuracy** (Win Trades, Win Rate, Long Win %, Short Win %, Best Close, Worst Close), and **Friction** (Total Binance Platform Fees, Total Funding Fees, Fee Drag On Gross, Gross PNL, Net PNL After Fees, Net Including Funding).
+
+Two honesty rules are built into the panel:
+
+1. **An unavailable number renders as `—`, never as zero.** If `/papi/v1/um/income` has not answered, funding shows `—` with the real status string underneath; a fabricated `+$0.000000` would look like "no funding paid", which is a different claim.
+2. **Fee drag is only quoted when there is gross profit to measure against.** With negative gross, the ratio is meaningless, so it prints `—` and says so.
 
 > The header's API-weight diode is driven by **data liveness**, not socket state. It cannot turn green on a handshake that delivers nothing.
 
@@ -412,6 +517,14 @@ It prints vault-decryption health, the authoritative Spot `apiRestrictions` perm
 - If your online dedicated/cloud server has **multiple public IPv4 addresses**, **all of them** are displayed in **Settings & IPs** with a **1-click Copy All Whitelist IPv4s** button (formatted space-separated for direct paste into Binance API Management).
 - Multi-IP server operators can also optionally pin all outbound Binance REST & WebSocket connections to a single chosen local interface IPv4 directly from the Settings UI.
 - All Binance sockets enforce `family: 4`, so requests deterministically egress from your whitelisted IPv4 and never silently fall back to IPv6/NAT64.
+
+**e) The egress IP moved underneath you (mobile / CGNAT connections)**
+
+A key that worked an hour ago can start returning `-2015` with no code change at all. On carrier-grade NAT the public address is drawn from a **pool**, and it rotates between connections — so Binance may reject a call from `37.111.200.200` while an IP-echo site tells you your address is `37.111.200.163`, and neither is the one you whitelisted. Two consequences worth knowing before you debug:
+
+- **Trust the IP inside Binance's own error message**, not a third-party echo service. `-2015 … request ip: <addr>` names the exact address that was rejected; that is the one to whitelist.
+- **This failure mode is dangerous, not merely annoying.** Public market data keeps working, so the scanner, candles and the 1s position monitor all stay green — while every *close* order is silently rejected. A position whose trailing stop has fired cannot be closed, and the engine correctly keeps retrying, so the profit peak is handed back one second at a time. If the log is full of `TRAILING_STOP_HIT` followed by `Failed to close … [-2015]`, fix the whitelist or close manually in the Binance app immediately.
+- Home/mobile connections are therefore a poor fit for an armed engine. A VPS or cloud host with a **static** IPv4 removes the whole class of failure.
 
 **d) Stream blackhole (an ISP/network issue, never an API-key issue)**
 

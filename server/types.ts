@@ -67,6 +67,8 @@ export interface ScannerAsset {
   recommendedLeverage: number;
   candleCount15s: number;
   lastSignalReason: string;
+  cooldownUntil: number;
+  substitutedFor: string | null;
   updatedAt: number;
 }
 
@@ -109,6 +111,22 @@ export interface OpenTradePosition {
   entryFeatures?: EntryFeatureVector;
 }
 
+export interface AiCouncilVote {
+  agent: string;
+  agentName: string;
+  vote: 'FOR' | 'AGAINST';
+  why: string;
+}
+
+export interface AiCouncilBallot {
+  param: string;
+  change: string;
+  reason: string;
+  votes: AiCouncilVote[];
+  forCount: number;
+  approved: boolean;
+}
+
 export interface AiPostMortemAnalysis {
   verdict: 'WIN_OPTIMAL' | 'WIN_EARLY_TRAIL' | 'LOSS_PREMATURE_PULLBACK' | 'LOSS_MOMENTUM_REVERSAL' | 'FEE_DRAG_BREAKEVEN';
   whatWorkedBest: string;
@@ -117,6 +135,13 @@ export interface AiPostMortemAnalysis {
   mfeCaptureRatio: number;
   brierLoss: number;
   agentConsensusSummary: string;
+  /**
+   * Per-voter record of the improvement council. Optional because trades closed
+   * before the council existed have no ballots — the UI shows that gap instead of
+   * back-filling one.
+   */
+  councilBallots?: AiCouncilBallot[];
+  nextStep?: string;
 }
 
 export interface ClosedTradeRecord {
@@ -250,6 +275,90 @@ export type ScannerOperatingState =
   | 'PAUSED_MARGIN_FULL'
   | 'PAUSED_BOT_STOPPED';
 
+export interface IncomeLedgerSummary {
+  available: boolean;
+  status: string;
+  lastSyncAt: number;
+  sinceMs: number;
+  /** Funding fees attributed to symbols this bot actually traded. */
+  fundingFeeTotal: number;
+  /** Every funding record Binance reported for the account, bot or not. */
+  fundingFeeAccountTotal: number;
+  commissionTotal: number;
+  realizedPnlTotal: number;
+  otherIncomeTotal: number;
+  recordCount: number;
+}
+
+export interface PnlLedgerPoint {
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  closedAt: number;
+  grossPnl: number;
+  binanceFees: number;
+  netPnl: number;
+  finalRoiPct: number;
+  durationSec: number;
+  exitReason: string;
+  cumulativeNet: number;
+  cumulativeSideNet: number;
+}
+
+export interface PnlLedgerStats {
+  totalTrades: number;
+  winTrades: number;
+  lossTrades: number;
+  winRatePct: number;
+  longTrades: number;
+  shortTrades: number;
+  longWinTrades: number;
+  shortWinTrades: number;
+  longWinRatePct: number;
+  shortWinRatePct: number;
+  longNetPnl: number;
+  shortNetPnl: number;
+  totalGrossPnl: number;
+  totalBinanceFees: number;
+  totalFundingFees: number;
+  totalNetPnl: number;
+  feeDragPctOfGross: number;
+  bestTradeNet: number;
+  worstTradeNet: number;
+  avgWinNet: number;
+  avgLossNet: number;
+  firstTradeAt: number | null;
+  lastTradeAt: number | null;
+}
+
+export interface PnlLedger {
+  stats: PnlLedgerStats;
+  points: PnlLedgerPoint[];
+  income: IncomeLedgerSummary;
+}
+
+export interface TradeLesson {
+  id: string;
+  createdAt: number;
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  verdict: AiPostMortemAnalysis['verdict'];
+  netPnl: number;
+  rsiBand: string;
+  deltaBand: string;
+  overextensionBand: string;
+  miss: string;
+  appliedAdjustments: string[];
+}
+
+export interface LessonPattern {
+  key: string;
+  sampleCount: number;
+  winCount: number;
+  netPnlTotal: number;
+  winRatePct: number;
+  lastTaughtAt: number;
+}
+
 export interface DashboardSnapshot {
   botName: string;
   copyright: string;
@@ -291,6 +400,11 @@ export interface DashboardSnapshot {
   lossCount: number;
   winRatePct: number;
   realizedNetPnlTotal: number;
+
+  // Settled-Trade Ledger & Analytics
+  pnlLedger: PnlLedger;
+  lessons: TradeLesson[];
+  lessonPatterns: LessonPattern[];
 
   // API Rate & System Telemetry
   rateTelemetry: ApiRateTelemetry;
