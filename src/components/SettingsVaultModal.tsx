@@ -331,7 +331,7 @@ export const SettingsVaultModal: React.FC<SettingsVaultModalProps> = ({
               <div className="flex items-center gap-2">
                 <KeyRound className="h-4 w-4 text-[#EBAEE6]" />
                 <h3 className="text-xs font-bold uppercase tracking-[0.14em] text-white">
-                  Binance USDⓈ-M Futures API Credentials (Real Production)
+                  Binance Portfolio Margin API Credentials (Real Production)
                 </h3>
               </div>
               {snapshot?.apiConfigured && (
@@ -403,7 +403,7 @@ export const SettingsVaultModal: React.FC<SettingsVaultModalProps> = ({
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
               <p className="text-[11px] text-[#e7cecc]">
                 Keys are encrypted locally with AES-256-GCM inside <code className="text-[#EBAEE6]">./data/hft_vault.json</code>. Enable{' '}
-                <strong className="text-white">&ldquo;Enable Futures&rdquo;</strong> on your Binance API key (do NOT enable withdrawal permission).
+                <strong className="text-white">&ldquo;Enable Portfolio Margin Trading&rdquo;</strong> on your Binance API key (do NOT enable withdrawal permission).
               </p>
 
               <button

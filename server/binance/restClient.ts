@@ -2,15 +2,26 @@ import https from 'node:https';
 import crypto from 'node:crypto';
 import { URLSearchParams } from 'node:url';
 import type { SymbolPrecisionFilter } from '../types.js';
-import type { BinanceRateGovernor, RequestPriority } from './rateGovernor.js';
+import type { BinanceRateGovernor, RequestPriority, WeightBucket } from './rateGovernor.js';
 import { countStepDecimals } from '../utils/format.js';
 import { logger } from '../utils/logger.js';
 
+// Public market data (time, exchangeInfo, tickers, aggTrades) only exists on the
+// classic Futures hosts. Everything signed goes to papi, because this account is
+// a Portfolio Margin account: its funds live in the unified PM wallet and the key
+// carries enablePortfolioMarginTrading rather than enableFutures.
 const BINANCE_FAPI_HOSTS = [
   'fapi.binance.com',
   'fapi1.binance.com',
   'fapi2.binance.com',
 ];
+
+const BINANCE_PAPI_HOSTS = ['papi.binance.com'];
+
+const API_HOSTS: Record<WeightBucket, string[]> = {
+  FAPI: BINANCE_FAPI_HOSTS,
+  PAPI: BINANCE_PAPI_HOSTS,
+};
 
 export interface BinanceApiError extends Error {
   code?: number;
@@ -64,10 +75,12 @@ export class BinanceFuturesRestClient {
   private apiSecret = '';
   private agent: https.Agent;
   private boundLocalAddress: string | null = null;
-  private hostIndex = 0;
+  private hostIndex: Record<WeightBucket, number> = { FAPI: 0, PAPI: 0 };
   private timeOffsetMs = 0;
   private symbolFilters = new Map<string, SymbolPrecisionFilter>();
   private commissionCache = new Map<string, { taker: number; maker: number; fetchedAt: number }>();
+  private lastUniMmr = 0;
+  private lastAccountStatus = 'UNKNOWN';
 
   constructor(private readonly rateGovernor: BinanceRateGovernor) {
     this.agent = this.createAgent(null);
@@ -127,6 +140,7 @@ export class BinanceFuturesRestClient {
   private async rawRequest<T>(options: {
     method: 'GET' | 'POST' | 'PUT' | 'DELETE';
     path: string;
+    api?: WeightBucket;
     params?: Record<string, string | number | boolean | undefined>;
     signed?: boolean;
     apiKeyHeaderOnly?: boolean;
@@ -137,6 +151,7 @@ export class BinanceFuturesRestClient {
     const {
       method,
       path,
+      api = 'FAPI',
       params = {},
       signed = false,
       apiKeyHeaderOnly = false,
@@ -149,7 +164,7 @@ export class BinanceFuturesRestClient {
       throw new Error('Binance API Key and Secret Key are not configured yet.');
     }
 
-    const allowed = await this.rateGovernor.acquireSlot(priority, weight);
+    const allowed = await this.rateGovernor.acquireSlot(priority, weight, api);
     if (!allowed) {
       const err: BinanceApiError = new Error(
         `Request skipped by Rate Governor to protect API weight budget (${path})`
@@ -175,7 +190,8 @@ export class BinanceFuturesRestClient {
 
     const queryStr = cleanParams.toString();
     const fullPath = queryStr ? `${path}?${queryStr}` : path;
-    const hostname = BINANCE_FAPI_HOSTS[this.hostIndex % BINANCE_FAPI_HOSTS.length];
+    const hosts = API_HOSTS[api];
+    const hostname = hosts[this.hostIndex[api] % hosts.length];
 
     const headers: Record<string, string> = {
       Accept: 'application/json',
@@ -205,7 +221,7 @@ export class BinanceFuturesRestClient {
           res.on('data', (chunk: Buffer) => chunks.push(chunk));
           res.on('end', async () => {
             const latencyMs = performance.now() - startedAt;
-            this.rateGovernor.recordHeaders(res.headers, latencyMs);
+            this.rateGovernor.recordHeaders(res.headers, latencyMs, api);
 
             const bodyText = Buffer.concat(chunks).toString('utf8');
             const status = res.statusCode ?? 500;
@@ -267,14 +283,14 @@ export class BinanceFuturesRestClient {
 
       req.on('timeout', () => {
         req.destroy();
-        this.hostIndex = (this.hostIndex + 1) % BINANCE_FAPI_HOSTS.length;
+        this.hostIndex[api] = (this.hostIndex[api] + 1) % hosts.length;
         const err: BinanceApiError = new Error(`Binance request timeout on ${hostname}${path}`);
         err.code = -1001;
         reject(err);
       });
 
       req.on('error', (netErr) => {
-        this.hostIndex = (this.hostIndex + 1) % BINANCE_FAPI_HOSTS.length;
+        this.hostIndex[api] = (this.hostIndex[api] + 1) % hosts.length;
         reject(netErr);
       });
 
@@ -425,7 +441,8 @@ export class BinanceFuturesRestClient {
   public async getDualPositionMode(): Promise<boolean> {
     const res = await this.rawRequest<{ dualSidePosition: boolean }>({
       method: 'GET',
-      path: '/fapi/v1/positionSide/dual',
+      path: '/papi/v1/um/positionSide/dual',
+      api: 'PAPI',
       signed: true,
       priority: 'P2_ACCOUNT_SYNC',
       weight: 30,
@@ -434,33 +451,75 @@ export class BinanceFuturesRestClient {
   }
 
   public async getAccountSummary(): Promise<RawAccountSummary> {
-    interface RawAccountResponse {
-      totalWalletBalance: string;
-      totalUnrealizedProfit: string;
-      totalMarginBalance: string;
-      availableBalance: string;
-      totalInitialMargin: string;
-      totalPositionInitialMargin: string;
-      totalOpenOrderInitialMargin: string;
+    interface RawPmAccount {
+      accountEquity: string;
+      accountInitialMargin: string;
+      accountMaintMargin: string;
+      totalAvailableBalance: string;
+      uniMMR: string;
+      accountStatus: string;
     }
 
-    const res = await this.rawRequest<RawAccountResponse>({
-      method: 'GET',
-      path: '/fapi/v2/account',
-      signed: true,
-      priority: 'P2_ACCOUNT_SYNC',
-      weight: 5,
-    });
+    interface RawPmAssetBalance {
+      asset: string;
+      totalWalletBalance: string;
+      umWalletBalance: string;
+      umUnrealizedPNL: string;
+      cmWalletBalance: string;
+      cmUnrealizedPNL: string;
+      negativeBalance: string;
+    }
+
+    // Portfolio Margin exposes no single endpoint carrying both unified equity and
+    // the per-asset wallet/PNL split, so both are needed. They are 20 weight and
+    // ~300 bytes each; /papi/v1/um/account would be 5 weight but a 317 KB payload
+    // because it inlines a row for every one of ~936 listed contracts.
+    const [pm, usdt] = await Promise.all([
+      this.rawRequest<RawPmAccount>({
+        method: 'GET',
+        path: '/papi/v1/account',
+        api: 'PAPI',
+        signed: true,
+        priority: 'P2_ACCOUNT_SYNC',
+        weight: 20,
+      }),
+      this.rawRequest<RawPmAssetBalance>({
+        method: 'GET',
+        path: '/papi/v1/balance',
+        api: 'PAPI',
+        params: { asset: 'USDT' },
+        signed: true,
+        priority: 'P2_ACCOUNT_SYNC',
+        weight: 20,
+      }),
+    ]);
+
+    const unrealized =
+      parseFloat(usdt.umUnrealizedPNL || '0') + parseFloat(usdt.cmUnrealizedPNL || '0');
+    const accountInitialMargin = parseFloat(pm.accountInitialMargin || '0');
+
+    this.lastUniMmr = parseFloat(pm.uniMMR || '0');
+    this.lastAccountStatus = pm.accountStatus || 'UNKNOWN';
 
     return {
-      totalWalletBalance: parseFloat(res.totalWalletBalance || '0'),
-      totalUnrealizedProfit: parseFloat(res.totalUnrealizedProfit || '0'),
-      totalMarginBalance: parseFloat(res.totalMarginBalance || '0'),
-      availableBalance: parseFloat(res.availableBalance || '0'),
-      totalInitialMargin: parseFloat(res.totalInitialMargin || '0'),
-      totalPositionInitialMargin: parseFloat(res.totalPositionInitialMargin || '0'),
-      totalOpenOrderInitialMargin: parseFloat(res.totalOpenOrderInitialMargin || '0'),
+      totalWalletBalance: parseFloat(usdt.totalWalletBalance || '0'),
+      totalUnrealizedProfit: unrealized,
+      totalMarginBalance: parseFloat(pm.accountEquity || '0'),
+      availableBalance: parseFloat(pm.totalAvailableBalance || '0'),
+      totalInitialMargin: accountInitialMargin,
+      // PM reports one unified initial-margin figure covering positions and resting
+      // orders together; the engine only ever consumes the sum of these two.
+      totalPositionInitialMargin: accountInitialMargin,
+      totalOpenOrderInitialMargin: 0,
     };
+  }
+
+  public getLastUniMmr(): number {
+    return this.lastUniMmr;
+  }
+
+  public getLastAccountStatus(): string {
+    return this.lastAccountStatus;
   }
 
   public async getPositionRisks(symbol?: string): Promise<RawPositionRisk[]> {
@@ -472,17 +531,15 @@ export class BinanceFuturesRestClient {
       unRealizedProfit: string;
       liquidationPrice: string;
       leverage: string;
-      marginType: string;
-      isolatedMargin: string;
       positionSide: 'BOTH' | 'LONG' | 'SHORT';
       notional: string;
-      initialMargin?: string;
       updateTime: number;
     }
 
     const rows = await this.rawRequest<RawPosItem[]>({
       method: 'GET',
-      path: '/fapi/v2/positionRisk',
+      path: '/papi/v1/um/positionRisk',
+      api: 'PAPI',
       params: symbol ? { symbol } : {},
       signed: true,
       priority: 'P1_EXECUTION_POSITION',
@@ -495,11 +552,7 @@ export class BinanceFuturesRestClient {
       const mark = parseFloat(r.markPrice || '0');
       const lev = Math.max(1, parseInt(r.leverage || '10', 10));
       const absNotional = Math.abs(parseFloat(r.notional || String(amt * mark)));
-      const initMargin = r.initialMargin
-        ? parseFloat(r.initialMargin)
-        : absNotional > 0
-        ? absNotional / lev
-        : (Math.abs(amt) * entry) / lev;
+      const initMargin = absNotional > 0 ? absNotional / lev : (Math.abs(amt) * entry) / lev;
 
       return {
         symbol: r.symbol,
@@ -509,8 +562,9 @@ export class BinanceFuturesRestClient {
         unRealizedProfit: parseFloat(r.unRealizedProfit || '0'),
         liquidationPrice: parseFloat(r.liquidationPrice || '0'),
         leverage: lev,
-        marginType: r.marginType || 'cross',
-        isolatedMargin: parseFloat(r.isolatedMargin || '0'),
+        // Portfolio Margin is always unified cross margin; it has no isolated mode.
+        marginType: 'cross',
+        isolatedMargin: 0,
         positionSide: r.positionSide || 'BOTH',
         notional: absNotional,
         initialMargin: initMargin,
@@ -533,7 +587,8 @@ export class BinanceFuturesRestClient {
         takerCommissionRate: string;
       }>({
         method: 'GET',
-        path: '/fapi/v1/commissionRate',
+        path: '/papi/v1/um/commissionRate',
+        api: 'PAPI',
         params: { symbol },
         signed: true,
         priority: 'P2_ACCOUNT_SYNC',
@@ -552,7 +607,8 @@ export class BinanceFuturesRestClient {
     const res = await this.rawRequest<{ leverage: number; maxNotionalValue: string; symbol: string }>(
       {
         method: 'POST',
-        path: '/fapi/v1/leverage',
+        path: '/papi/v1/um/leverage',
+        api: 'PAPI',
         params: { symbol, leverage },
         signed: true,
         priority: 'P1_EXECUTION_POSITION',
@@ -588,7 +644,8 @@ export class BinanceFuturesRestClient {
 
     return this.rawRequest<RawOrderResult>({
       method: 'POST',
-      path: '/fapi/v1/order',
+      path: '/papi/v1/um/order',
+      api: 'PAPI',
       params: orderParams,
       signed: true,
       priority: params.isCloseOrder ? 'P0_CRITICAL_EXIT' : 'P1_EXECUTION_POSITION',
@@ -599,7 +656,8 @@ export class BinanceFuturesRestClient {
   public async createListenKey(): Promise<string> {
     const res = await this.rawRequest<{ listenKey: string }>({
       method: 'POST',
-      path: '/fapi/v1/listenKey',
+      path: '/papi/v1/listenKey',
+      api: 'PAPI',
       apiKeyHeaderOnly: true,
       priority: 'P2_ACCOUNT_SYNC',
       weight: 1,
@@ -610,7 +668,8 @@ export class BinanceFuturesRestClient {
   public async keepAliveListenKey(): Promise<void> {
     await this.rawRequest({
       method: 'PUT',
-      path: '/fapi/v1/listenKey',
+      path: '/papi/v1/listenKey',
+      api: 'PAPI',
       apiKeyHeaderOnly: true,
       priority: 'P2_ACCOUNT_SYNC',
       weight: 1,

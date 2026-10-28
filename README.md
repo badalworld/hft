@@ -3,10 +3,11 @@
 
   <br />
 
-  [![Platform](https://img.shields.io/badge/Exchange-Binance%20USD%E2%93%88--M%20Futures-F0B90B?style=for-the-badge)](https://www.binance.com/en/futures)
+  [![Platform](https://img.shields.io/badge/Exchange-Binance%20Portfolio%20Margin%20(UM)-F0B90B?style=for-the-badge)](https://www.binance.com/en/futures)
   [![Timeframe](https://img.shields.io/badge/Execution-15s%20Candles%20%7C%201s%20Monitor-ADEBB3?style=for-the-badge)](#3-real-time-15-second-candle-engine--pullback-strategy)
   [![AI Club](https://img.shields.io/badge/AI%20Club-LangGraph%20%2B%20System--1%20(%240%20Fee)-EBAEE6?style=for-the-badge)](#5-zero-cost-self-learning-ai-agent-club)
   [![Design](https://img.shields.io/badge/UI%2FUX-Lotus%20Garden%20Skeuomorphism-FF857A?style=for-the-badge)](#6-lotus-garden-luxury-skeuomorphism-uiux)
+  [![Version](https://img.shields.io/badge/Version-1.1.0-6B403C?style=for-the-badge)](#whats-new-in-v110)
 </div>
 
 ---
@@ -16,9 +17,25 @@
 > **Trade Smarter • Grow Faster**  
 > **Copyright © & Developed by Trading Lifestyle Quant.**
 
-**HFT** is a real-money, production-grade **Binance USDⓈ-M Futures (`fapi.binance.com` & `fstream.binance.com`)** automated High-Frequency Trading environment engineered for ultra-fast micro-pullback execution on **15-second candles**, **1-second open-position monitoring**, **fee-aware Net PNL tracking**, and **$0.00 zero-cost autonomous self-learning** via a 5-agent **LangGraph** state machine and **System-1 Typed Decision Primitives (`Nimble` / `Laya` / `Kev` / Brier RLCD)**.
+**HFT** is a real-money, production-grade **Binance Portfolio Margin / USDⓈ-M Futures (`papi.binance.com`, `fapi.binance.com` & `fstream.binance.com`)** automated High-Frequency Trading environment engineered for ultra-fast micro-pullback execution on **15-second candles**, **1-second open-position monitoring**, **fee-aware Net PNL tracking**, and **$0.00 zero-cost autonomous self-learning** via a 5-agent **LangGraph** state machine and **System-1 Typed Decision Primitives (`Nimble` / `Laya` / `Kev` / Brier RLCD)**.
 
-> **Important Production Notice**: This system connects directly to **live production Binance USDⓈ-M Futures** (not a simulation and not Testnet). Trades execute immediately once you save your Binance API Key & Secret Key in **Settings & IPs** and toggle **ARM ENGINE**.
+> **Important Production Notice**: This system connects directly to **live production Binance** (not a simulation and not Testnet). Trades execute immediately once you save your Binance API Key & Secret Key in **Settings & IPs** and toggle **ARM ENGINE**.
+
+---
+
+## What's New in `v1.1.0`
+
+**Portfolio Margin (`papi`) execution support.** The engine now trades the **Binance Portfolio Margin unified cross-margin wallet** in addition to classic USDⓈ-M Futures.
+
+| Change | Detail |
+| :--- | :--- |
+| **Signed calls moved to `papi.binance.com`** | All authenticated requests (account, balance, position risk, leverage, orders, listen keys) now target `/papi/v1/...` and `/papi/v1/um/...`. Public market data (`time`, `exchangeInfo`, `ticker/24hr`, `aggTrades`) still comes from `fapi.binance.com`, which is the only host that serves it. |
+| **Per-host API weight budgets** | Binance meters `fapi` and `papi` against **independent** weight limits while reporting both as `x-mbx-used-weight-1m`. The Rate Governor now tracks a separate counter per host so neither host's header can clobber the other's reading. |
+| **Unified cross-margin model** | Portfolio Margin exposes one combined `accountInitialMargin` (positions **and** resting orders together), unified `accountEquity` / `totalAvailableBalance`, and a `uniMMR` maintenance-margin ratio. These are mapped into the existing account summary so the `95.000000%` equity pool, ROI, and trailing-stop math are unchanged. |
+| **Resilient market-stream DNS** | `fstream.binance.com` resolves to ~8 edge IPs and some ISPs blackhole a subset (TCP connects, the WebSocket upgrade never completes). Since Node's resolver returns a stable address order, a plain reconnect retried the same dead edge forever. The WS manager now rotates the resolved address on every attempt so each retry lands on a different edge. |
+| **Credential diagnostics** | `scripts/diagnoseApiKey.ts` reports vault decryption health and live permission readouts across Spot, Futures, and Portfolio Margin hosts. It only ever prints credential **length, charset, and first/last 4 characters** — never full key material. |
+
+> Portfolio Margin is **always unified cross margin** — there is no isolated mode, and `/papi/v1/um/positionRisk` returns no per-position `marginType` / `isolatedMargin` fields.
 
 ---
 
@@ -30,7 +47,7 @@
 4. [1-Second Open Position Monitor & 5% ROI Trailing Stop](#4-1-second-open-position-monitor--5-roi-trailing-stop)
 5. [Zero-Cost Self-Learning AI Agent Club](#5-zero-cost-self-learning-ai-agent-club)
 6. [Lotus Garden Luxury Skeuomorphism UI/UX](#6-lotus-garden-luxury-skeuomorphism-uiux)
-7. [Multi-IPv4 Whitelist Discovery (PC & Multi-IP Servers)](#7-multi-ipv4-whitelist-discovery-pc--multi-ip-servers)
+7. [IPv4 Whitelist Discovery & Portfolio Margin Routing](#7-ipv4-whitelist-discovery--portfolio-margin-routing)
 8. [Quickstart — Localhost PC Setup](#8-quickstart--localhost-pc-setup)
 9. [Production Deployment — Online VPS / Dedicated Server](#9-production-deployment--online-vps--dedicated-server)
 10. [Optional Local System-1 Models (`Nimble`, `Laya`, `Kev`, `Ollama`)](#10-optional-local-system-1-models-nimble-laya-kev-ollama)
@@ -43,13 +60,14 @@
 
 ```mermaid
 flowchart TB
-    subgraph Binance["Binance USDⓈ-M Futures (Production)"]
-        FAPI["HTTPS REST Keep-Alive\nfapi.binance.com"]
-        FSTREAM["Multiplexed WebSockets\nfstream.binance.com\n(!ticker@arr, !markPrice@arr@1s, aggTrade, listenKey)"]
+    subgraph Binance["Binance Production Hosts"]
+        PAPI["HTTPS REST (Signed)\npapi.binance.com\n(/papi/v1/account, /papi/v1/um/*)"]
+        FAPI["HTTPS REST (Public Market Data)\nfapi.binance.com\n(time, exchangeInfo, ticker/24hr, aggTrades)"]
+        FSTREAM["Multiplexed WebSockets\nfstream.binance.com\n(!ticker@arr, !markPrice@arr@1s, aggTrade, /pm/ws listenKey)"]
     end
 
     subgraph Engine["HFT Core Execution Engine (Node.js / TypeScript)"]
-        GOV["Priority API Rate Governor\n(2,400/min Weight + 300/10s Orders)"]
+        GOV["Priority API Rate Governor\n(Per-Host 2,400/min Weight + 300/10s Orders)"]
         CB15["15-Second Candle Builder\n(UTC-Aligned OHLCV + Buyer/Seller Delta)"]
         SCAN40["Top-40 24h Market Scanner\n(20 Max Positive + 20 Max Negative)"]
         STRAT["15s Pullback + Confirmation Detector"]
@@ -74,6 +92,7 @@ flowchart TB
     FSTREAM --> SCAN40
     FSTREAM --> MON1S
     FAPI <--> GOV
+    PAPI <--> GOV
     SCAN40 --> STRAT
     CB15 --> STRAT
     STRAT --> AG1 --> AG2 --> AG3 --> AG4 --> LADDER
@@ -90,14 +109,14 @@ flowchart TB
 
 | Parameter | Specification | Implementation Details |
 | :--- | :--- | :--- |
-| **Exchange Market** | Binance USDⓈ-M Perpetuals (`USDT`) | Filters active `TRADING` `PERPETUAL` `USDT`-margined contracts via `/fapi/v1/exchangeInfo`. Automatically supports **One-Way Mode** & **Hedge Mode** (`/fapi/v1/positionSide/dual`). |
+| **Exchange Market** | Binance USDⓈ-M Perpetuals (`USDT`) | Filters active `TRADING` `PERPETUAL` `USDT`-margined contracts via `/fapi/v1/exchangeInfo`. Automatically supports **One-Way Mode** & **Hedge Mode** (`/papi/v1/um/positionSide/dual`). |
 | **Universe Size** | **40 Assets** (`20` Positive + `20` Negative) | Ranks 24h `priceChangePercent` continuously: Top 20 gainers (`LONG` only) and Top 20 losers (`SHORT` only). |
 | **Execution Timeframe** | **15-Second (`15s`) Candles** | Real-time UTC-aligned `15,000ms` candles constructed from `<symbol>@aggTrade` WebSocket ticks + `/fapi/v1/aggTrades` warmup. |
 | **Base Margin / Trade** | **`$2.000000` USDT** | Dedicated base margin per position entry. |
 | **Leverage Fallback Ladder** | **`10x → 11x → 12x → 13x → 14x → 15x`** | Attempts `10x` first. If order execution, `MIN_NOTIONAL`, or `LOT_SIZE` `minQty`/`stepSize` fails at `10x`, automatically escalates `11x`, `12x`, `13x`, `14x`, up to `15x`. |
 | **Profit Target & Trail** | **`+5.000000%` ROI → Trailing Stop** | The instant ROI hits `+5.000000%`, Trailing Stop arms, locks a fee-positive profit floor, and trails peak ROI dynamically to capture maximum profit. |
-| **Open Trade Check** | **Every `1.000000` Second** | Dedicated 1-second heartbeat reconciled with `/fapi/v2/positionRisk` + `!markPrice@arr@1s` WebSocket ticks. |
-| **Capital Allocation Cap** | **`95.000000%` of Equity** | Uses up to 95% of balance for trade execution. When free budget in the 95% pool drops below `$2.000000`, **Market Scanner automatically pauses** and focuses 100% on open running positions. |
+| **Open Trade Check** | **Every `1.000000` Second** | Dedicated 1-second heartbeat reconciled with `/papi/v1/um/positionRisk` + `!markPrice@arr@1s` WebSocket ticks. |
+| **Capital Allocation Cap** | **`95.000000%` of Equity** | Uses up to 95% of unified `accountEquity` for trade execution. When free budget in the 95% pool drops below `$2.000000`, **Market Scanner automatically pauses** and focuses 100% on open running positions. |
 | **Start Balance Rule** | **Fixed on 1st API Connection** | Captured automatically the very first time Binance API connects and locked permanently until you click **Reset Start Balance** in Settings. |
 | **Numeric Precision** | **Strict `0.000000` (6 Decimals)** | Every balance, price, ROI %, Gross PNL, Binance Fee, Net PNL, and telemetry figure renders with exact 6-decimal formatting. |
 
@@ -131,7 +150,7 @@ Every open position is inspected every **`1.000000` second** (`server/engine/pos
 4. **Mark Price** (`0.000000`)
 5. **ROI (%)** (`(Gross PNL / Initial Margin) × 100`, `0.000000%`)
 6. **PNL (Gross USDT)** (`0.000000`)
-7. **Binance Platform Fees** (`Entry Commission + Estimated Exit Commission` queried per symbol via `/fapi/v1/commissionRate`, `0.000000`)
+7. **Binance Platform Fees** (`Entry Commission + Estimated Exit Commission` queried per symbol via `/papi/v1/um/commissionRate`, `0.000000`)
 8. **Net PNL** (`Gross PNL - Binance Platform Fees`, `0.000000`)
 9. **Running Trade Time** (`HH:MM:SS (0.000000s)`)
 
@@ -171,12 +190,32 @@ The primary screen remains pure and distraction-free—displaying **only** your 
 
 ---
 
-## 7. Multi-IPv4 Whitelist Discovery (PC & Multi-IP Servers)
+## 7. IPv4 Whitelist Discovery & Portfolio Margin Routing
 
-To prevent critical Binance `-2015 Invalid API-key, IP, or permissions` rejections:
+A Binance `-2015 Invalid API-key, IP, or permissions` rejection has **three** distinct causes, and whitelisting is only one of them. Check them in this order:
+
+### a) Wrong wallet / wrong host (most common, and whitelisting will never fix it)
+
+If your account is in **Portfolio Margin** mode, your funds live in the **PM unified wallet**, which `fapi.binance.com` cannot see at all. Classic Futures endpoints will keep returning `-2015` no matter how many IPs you whitelist, because the key carries `enablePortfolioMarginTrading` rather than `enableFutures`. **HFT** routes every signed call to `papi.binance.com` for exactly this reason.
+
+Run the bundled diagnostic to see which permissions and wallets your key actually has:
+
+```bash
+./node_modules/.bin/tsx scripts/diagnoseApiKey.ts
+```
+
+It prints vault-decryption health, the authoritative Spot `apiRestrictions` permission readout, and live status codes for Futures *and* Portfolio Margin endpoints side by side. Credential values are never printed — only length, charset, and first/last 4 characters.
+
+### b) Missing API-key permission
+
+Enable **"Enable Portfolio Margin Trading"** (or **"Enable Futures"** for a classic Futures account) in Binance API Management. **Never enable Withdrawal permissions.**
+
+### c) Un-whitelisted egress IPv4
+
 - `server/utils/ipDiscovery.ts` enumerates **every non-loopback network interface** (`os.networkInterfaces()`) AND performs **per-interface socket-bound (`localAddress`) outbound IPv4 probes** across multiple independent echo endpoints (`ipify`, `icanhazip`, `amazonaws`, `ident.me`).
 - If your online dedicated/cloud server has **multiple public IPv4 addresses**, **all of them** are displayed in **Settings & IPs** with a **1-click Copy All Whitelist IPv4s** button (formatted space-separated for direct paste into Binance API Management).
 - Multi-IP server operators can also optionally pin all outbound Binance REST & WebSocket connections to a single chosen local interface IPv4 directly from the Settings UI.
+- All Binance sockets enforce `family: 4`, so requests deterministically egress from your whitelisted IPv4 and never silently fall back to IPv6/NAT64.
 
 ---
 
@@ -184,7 +223,7 @@ To prevent critical Binance `-2015 Invalid API-key, IP, or permissions` rejectio
 
 ### Prerequisites
 - **Node.js `v20+`** (recommended `v22 LTS`) and `npm`
-- A real **Binance Account** with **USDⓈ-M Futures** enabled and an API Key with **"Enable Futures"** checked (*never enable Withdrawal permissions*).
+- A real **Binance Account** with **Portfolio Margin** enabled and an API Key with **"Enable Portfolio Margin Trading"** checked (*never enable Withdrawal permissions*). Signed calls go to `papi.binance.com/papi/v1/um/*`; public market data still comes from `fapi.binance.com`.
 
 ### Step-by-Step Commands
 
@@ -205,6 +244,12 @@ npm test
 # 5. Start the live HFT server + UI (http://localhost:3000)
 npm run dev
 ```
+
+> **Windows note**: `package.json` uses POSIX inline environment syntax (`NODE_ENV=production tsx ...`). npm runs scripts through `cmd.exe`, which fails with `'NODE_ENV' is not recognized`. Run the commands from **Git Bash** instead, or start the server directly:
+> ```bash
+> NODE_ENV=production ./node_modules/.bin/tsx server/index.ts
+> ```
+> If `npm install` reports that the `esbuild` build script was blocked, approve it with `npm install-scripts approve esbuild` (Vite needs the binary).
 
 1. Open **`http://localhost:3000`** in your browser.
 2. Click **Settings & IPs** (top right) and copy your detected **Public Outbound IPv4 Address(es)** into your Binance API Key IP Whitelist.
@@ -279,7 +324,7 @@ Out of the box, **HFT** uses its built-in calibrated **System-1 RLCD Engine** (`
 | `GET /api/health` | Engine liveness check & build metadata |
 | `GET /api/snapshot` | Full real-time `DashboardSnapshot` (balances, open trades, 40 scanner assets, AI Club, rate limits, IPs) |
 | `POST /api/engine/toggle` | Arm (`{ running: true }`) or pause (`{ running: false }`) automated order entries |
-| `POST /api/settings/credentials` | Encrypt & store `{ apiKey, apiSecret }` in AES-256-GCM vault and connect to Binance Futures |
+| `POST /api/settings/credentials` | Encrypt & store `{ apiKey, apiSecret }` in AES-256-GCM vault and connect to Binance Portfolio Margin |
 | `POST /api/settings/reset-start-balance` | Reset & re-lock the fixed Start Balance to current live Binance wallet balance |
 | `POST /api/settings/rescan-ips` | Re-probe all server network interfaces and outbound public IPv4 addresses |
 | `POST /api/settings/bind-ip` | Pin outbound Binance HTTP/WS sockets to a specific local NIC IPv4 (`{ localAddress }`) |
@@ -305,9 +350,9 @@ hft/
 │   │   ├── system1Primitives.ts  # System-1 RLCD engine, Brier updates & Nimble/Laya/Kev adapters
 │   │   └── agentClubGraph.ts     # @langchain/langgraph 5-Agent Entry & Post-Mortem StateGraphs
 │   ├── binance/
-│   │   ├── rateGovernor.ts       # Priority-tiered 2,400/min API weight & order governor
-│   │   ├── restClient.ts         # Persistent Keep-Alive HMAC-SHA256 Binance FAPI client
-│   │   ├── wsStreamManager.ts    # Multiplexed fstream.binance.com WebSocket manager
+│   │   ├── rateGovernor.ts       # Priority-tiered per-host API weight & order governor (FAPI + PAPI buckets)
+│   │   ├── restClient.ts         # Keep-Alive HMAC-SHA256 client: signed -> papi, public market data -> fapi
+│   │   ├── wsStreamManager.ts    # Multiplexed fstream.binance.com WS manager + rotating edge-IP DNS lookup
 │   │   └── candleBuilder15s.ts   # Real-time 15-second OHLCV + Orderflow Delta aggregator
 │   ├── engine/
 │   │   ├── stateStore.ts         # Atomic encrypted vault & persistent Start Balance / AI brain
@@ -337,7 +382,8 @@ hft/
 │   └── utils/
 │       └── format.ts             # Strict 6-decimal UI formatters
 ├── scripts/
-│   └── selfTest.ts               # Automated verification suite for strategy, trailing stop & AI Club
+│   ├── selfTest.ts               # Automated verification suite for strategy, trailing stop & AI Club
+│   └── diagnoseApiKey.ts         # Vault decrypt health + live Spot/Futures/Portfolio Margin permission probe
 ├── ecosystem.config.cjs          # PM2 production process configuration
 └── .env.example                  # Environment configuration template
 ```
@@ -346,6 +392,8 @@ hft/
 - `./data/` (containing encrypted API credentials, daily logs, and contrastive trade journals) and `.env` are strictly excluded via `.gitignore` and **never committed to Git**.
 - Binance API credentials are encrypted at rest using **AES-256-GCM** (`scrypt` key derivation).
 - All Binance outbound sockets enforce `family: 4` (IPv4) so requests deterministically match your whitelisted IPv4 address(es).
+- Diagnostic tooling and logs **never** emit full key material — only credential length, charset, and first/last 4 characters.
+- The API key requires **trading** permission only. **Withdrawal permission must never be enabled.**
 
 ---
 

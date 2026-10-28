@@ -204,7 +204,7 @@ export class HftBotEngine {
       return { connected: false, message: 'Credentials cleared.' };
     }
 
-    logger.info('BINANCE_API', 'Validating Binance USDⓈ-M Futures API credentials...');
+    logger.info('BINANCE_API', 'Validating Binance Portfolio Margin (UM) API credentials...');
     const ok = await this.connectAuthenticatedAccount();
     this.broadcastSnapshot();
     return ok;
@@ -225,13 +225,15 @@ export class HftBotEngine {
       this.apiConnected = true;
       logger.success(
         'BINANCE_API',
-        `Binance USDⓈ-M Futures Connected! Mode: ${
+        `Binance Portfolio Margin (UM) Connected! Mode: ${
           this.hedgeMode ? 'HEDGE MODE (Dual-Side)' : 'ONE-WAY MODE'
-        } | Equity: $${f6(this.currentEquity)} USDT`
+        } | Equity: $${f6(this.currentEquity)} USDT | uniMMR: ${f6(
+          this.restClient.getLastUniMmr()
+        )} | Status: ${this.restClient.getLastAccountStatus()}`
       );
       return {
         connected: true,
-        message: `Connected to Binance Futures (${
+        message: `Connected to Binance Portfolio Margin (${
           this.hedgeMode ? 'Hedge Mode' : 'One-Way Mode'
         }). Equity: $${f6(this.currentEquity)} USDT`,
       };
@@ -240,7 +242,7 @@ export class HftBotEngine {
       const msg = (err as Error).message;
       logger.error(
         'BINANCE_API',
-        `Binance Futures authentication/network error: ${msg}. Verify API Key, Secret, 'Enable Futures' permission, and IPv4 Whitelist in Settings.`
+        `Binance Portfolio Margin authentication/network error: ${msg}. Verify API Key, Secret, 'Enable Portfolio Margin Trading' permission, and IPv4 Whitelist in Settings.`
       );
       return {
         connected: false,

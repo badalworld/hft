@@ -7,8 +7,13 @@ export type RequestPriority =
   | 'P2_ACCOUNT_SYNC'
   | 'P3_BACKGROUND_SCAN';
 
+// Binance meters fapi.binance.com and papi.binance.com against independent
+// weight budgets and reports both as x-mbx-used-weight-1m, so a single counter
+// would let each host's header clobber the other's reading.
+export type WeightBucket = 'FAPI' | 'PAPI';
+
 export class BinanceRateGovernor {
-  private usedWeight1m = 0;
+  private usedWeight1m: Record<WeightBucket, number> = { FAPI: 0, PAPI: 0 };
   private readonly maxWeight1m = 2400; // Binance USDⓈ-M Futures standard IP/UID 1m weight limit
   private orderCount10s = 0;
   private readonly maxOrders10s = 300;
@@ -26,12 +31,17 @@ export class BinanceRateGovernor {
     const bucket = Math.floor(Date.now() / 60_000);
     if (bucket !== this.lastMinuteBucket) {
       this.lastMinuteBucket = bucket;
-      this.usedWeight1m = Math.max(0, Math.floor(this.usedWeight1m * 0.15));
+      this.usedWeight1m.FAPI = Math.max(0, Math.floor(this.usedWeight1m.FAPI * 0.15));
+      this.usedWeight1m.PAPI = Math.max(0, Math.floor(this.usedWeight1m.PAPI * 0.15));
       this.orderCount1m = 0;
     }
   }
 
-  public async acquireSlot(priority: RequestPriority, estimatedWeight = 1): Promise<boolean> {
+  public async acquireSlot(
+    priority: RequestPriority,
+    estimatedWeight = 1,
+    bucket: WeightBucket = 'FAPI'
+  ): Promise<boolean> {
     this.refreshBucketIfNeeded();
     const now = Date.now();
 
@@ -39,36 +49,40 @@ export class BinanceRateGovernor {
       return false;
     }
 
-    const projected = this.usedWeight1m + estimatedWeight;
+    const projected = this.usedWeight1m[bucket] + estimatedWeight;
     const ratio = projected / this.maxWeight1m;
 
     if (priority === 'P0_CRITICAL_EXIT') {
-      this.usedWeight1m = projected;
+      this.usedWeight1m[bucket] = projected;
       return true;
     }
     if (priority === 'P1_EXECUTION_POSITION' && ratio <= 0.96) {
-      this.usedWeight1m = projected;
+      this.usedWeight1m[bucket] = projected;
       return true;
     }
     if (priority === 'P2_ACCOUNT_SYNC' && ratio <= 0.88) {
-      this.usedWeight1m = projected;
+      this.usedWeight1m[bucket] = projected;
       return true;
     }
     if (priority === 'P3_BACKGROUND_SCAN' && ratio <= 0.78) {
-      this.usedWeight1m = projected;
+      this.usedWeight1m[bucket] = projected;
       return true;
     }
 
     return false;
   }
 
-  public recordHeaders(headers: Record<string, string | string[] | undefined>, latencyMs: number) {
+  public recordHeaders(
+    headers: Record<string, string | string[] | undefined>,
+    latencyMs: number,
+    bucket: WeightBucket = 'FAPI'
+  ) {
     this.refreshBucketIfNeeded();
 
     const w1m = headers['x-mbx-used-weight-1m'];
     if (w1m !== undefined) {
       const parsed = parseInt(Array.isArray(w1m) ? w1m[0] : w1m, 10);
-      if (Number.isFinite(parsed)) this.usedWeight1m = parsed;
+      if (Number.isFinite(parsed)) this.usedWeight1m[bucket] = parsed;
     }
 
     const o10s = headers['x-mbx-order-count-10s'];
@@ -104,10 +118,12 @@ export class BinanceRateGovernor {
         ? this.latencySamples.reduce((a, b) => a + b, 0) / this.latencySamples.length
         : 0;
 
+    const worstBucketWeight = Math.max(this.usedWeight1m.FAPI, this.usedWeight1m.PAPI);
+
     return {
-      usedWeight1m: this.usedWeight1m,
+      usedWeight1m: worstBucketWeight,
       maxWeight1m: this.maxWeight1m,
-      utilizationPct: Math.min(100, (this.usedWeight1m / this.maxWeight1m) * 100),
+      utilizationPct: Math.min(100, (worstBucketWeight / this.maxWeight1m) * 100),
       orderCount10s: this.orderCount10s,
       maxOrders10s: this.maxOrders10s,
       orderCount1m: this.orderCount1m,

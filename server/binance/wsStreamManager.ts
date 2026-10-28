@@ -1,4 +1,6 @@
 import WebSocket from 'ws';
+import dns from 'node:dns';
+import type { LookupFunction } from 'node:net';
 import type { BinanceRateGovernor } from './rateGovernor.js';
 import type { BinanceFuturesRestClient } from './restClient.js';
 import type { CandleBuilder15s } from './candleBuilder15s.js';
@@ -141,12 +143,43 @@ export class BinanceWsStreamManager {
   }
 
   private wsOptions(): WebSocket.ClientOptions {
-    return {
+    // ws spreads these straight into tls.connect, which honours `lookup` even
+    // though ws does not declare it on ClientOptions.
+    const opts: WebSocket.ClientOptions & { lookup: LookupFunction } = {
       handshakeTimeout: 8000,
       family: 4,
+      lookup: this.rotatingLookup,
       ...(this.boundLocalAddress ? { localAddress: this.boundLocalAddress } : {}),
     };
+    return opts;
   }
+
+  // fstream.binance.com resolves to ~8 edge IPs and some networks blackhole a
+  // subset of them: TCP connects but the upgrade handshake never completes.
+  // The resolver returns them in a stable order, so a plain reconnect would retry
+  // the same dead edge forever. Advancing the offset per attempt makes each retry
+  // land on a different one.
+  private lookupAttempt = 0;
+
+  private rotatingLookup: LookupFunction = (hostname, options, callback) => {
+    dns.resolve4(hostname, (err, addresses) => {
+      if (err || !addresses || addresses.length === 0) {
+        dns.lookup(hostname, options as dns.LookupOneOptions, callback);
+        return;
+      }
+      const start = this.lookupAttempt++ % addresses.length;
+      const rotated = [...addresses.slice(start), ...addresses.slice(0, start)];
+      if (options && (options as dns.LookupOptions).all) {
+        callback(
+          null,
+          rotated.map((address) => ({ address, family: 4 })) as never,
+          4
+        );
+        return;
+      }
+      callback(null, rotated[0] as never, 4);
+    });
+  };
 
   private connectMarketWs() {
     if (!this.running) return;
@@ -360,7 +393,9 @@ export class BinanceWsStreamManager {
 
     try {
       const listenKey = await this.restClient.createListenKey();
-      const url = `wss://fstream.binance.com/ws/${listenKey}`;
+      // Portfolio Margin listen keys are routed under the /pm/ namespace, not the
+      // classic Futures /ws/ one.
+      const url = `wss://fstream.binance.com/pm/ws/${listenKey}`;
       const ws = new WebSocket(url, this.wsOptions());
       this.userWs = ws;
 
