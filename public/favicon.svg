@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#3c2220" />
+      <stop offset="55%" stop-color="#1d100f" />
+      <stop offset="100%" stop-color="#120909" />
+    </linearGradient>
+    <linearGradient id="candle" x1="64" y1="14" x2="64" y2="114" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#80FF54" />
+      <stop offset="48%" stop-color="#2CE06B" />
+      <stop offset="100%" stop-color="#0C8B53" />
+    </linearGradient>
+    <linearGradient id="silver" x1="0" y1="30" x2="0" y2="104" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="55%" stop-color="#DCE3EE" />
+      <stop offset="100%" stop-color="#8E9BAE" />
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#bg)" stroke="#EBAEE6" stroke-opacity="0.35" stroke-width="2" />
+  <!-- Stylised H left accent -->
+  <path d="M22 44H33L20 96L31 90L35 74H47L43 90H54L65 44H54L51 62H39L43 44H22Z" fill="url(#silver)" opacity="0.92" />
+  <!-- Bullish Candlestick T + Breakout Arrow -->
+  <rect x="69" y="14" width="4" height="14" rx="1.5" fill="#80FF54" />
+  <path d="M50 38L59 26H96L87 38H50Z" fill="url(#candle)" />
+  <rect x="62" y="23" width="18" height="72" rx="2" fill="url(#candle)" />
+  <rect x="69" y="95" width="4" height="15" rx="1.5" fill="#14A462" />
+  <!-- Breakout Arrow -->
+  <path d="M84 58L104 34L98 29L116 20L111 40L105 35L91 58H84Z" fill="url(#candle)" />
+</svg>
