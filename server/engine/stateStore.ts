@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
@@ -5,6 +6,8 @@ import type {
   ClosedTradeRecord,
   EntryFeatureVector,
   LocalDecisionConfig,
+  OperatorDirective,
+  OperatorNote,
   StyleMutationRecord,
   System1Weights,
   TradeLesson,
@@ -57,6 +60,8 @@ interface RawVaultData {
   openPositionMeta: Record<string, PersistedPositionMeta>;
   incomeLedger: PersistedIncomeLedger;
   lessons: TradeLesson[];
+  operatorDirectives: OperatorDirective[];
+  operatorNotes: OperatorNote[];
 }
 
 export class StateStore {
@@ -108,6 +113,8 @@ export class StateStore {
         seenTranIds: [],
       },
       lessons: [],
+      operatorDirectives: [],
+      operatorNotes: [],
     };
   }
 
@@ -129,6 +136,10 @@ export class StateStore {
         openPositionMeta: parsed.openPositionMeta || {},
         incomeLedger: { ...def.incomeLedger, ...(parsed.incomeLedger || {}) },
         lessons: Array.isArray(parsed.lessons) ? parsed.lessons : [],
+        operatorDirectives: Array.isArray(parsed.operatorDirectives)
+          ? parsed.operatorDirectives
+          : [],
+        operatorNotes: Array.isArray(parsed.operatorNotes) ? parsed.operatorNotes : [],
       };
     } catch {
       return def;
@@ -239,6 +250,72 @@ export class StateStore {
   public setLocalDecisionConfig(cfg: LocalDecisionConfig) {
     this.data.localDecisionConfig = cfg;
     this.save();
+  }
+
+  public getOperatorDirectives(): OperatorDirective[] {
+    return this.data.operatorDirectives;
+  }
+
+  public addOperatorDirective(input: {
+    kind: OperatorDirective['kind'];
+    symbol?: string;
+    value?: number;
+    reason?: string;
+  }): OperatorDirective {
+    const directive: OperatorDirective = {
+      id: crypto.randomUUID(),
+      createdAt: Date.now(),
+      kind: input.kind,
+      symbol: input.symbol?.toUpperCase(),
+      value: input.value,
+      reason: (input.reason || '').trim().slice(0, 240),
+      active: true,
+      appliedCount: 0,
+      lastAppliedAt: null,
+    };
+    this.data.operatorDirectives = [directive, ...this.data.operatorDirectives];
+    this.save();
+    return directive;
+  }
+
+  /** Revoking keeps the record so the operator can see what the club was told earlier. */
+  public setOperatorDirectiveActive(id: string, active: boolean): boolean {
+    const found = this.data.operatorDirectives.find((d) => d.id === id);
+    if (!found) return false;
+    found.active = active;
+    this.save();
+    return true;
+  }
+
+  public recordDirectiveApplied(id: string) {
+    const found = this.data.operatorDirectives.find((d) => d.id === id);
+    if (!found) return;
+    found.appliedCount += 1;
+    found.lastAppliedAt = Date.now();
+    this.save();
+  }
+
+  public getOperatorNotes(): OperatorNote[] {
+    return this.data.operatorNotes;
+  }
+
+  public addOperatorNote(text: string): OperatorNote {
+    const note: OperatorNote = {
+      id: crypto.randomUUID(),
+      createdAt: Date.now(),
+      text: text.trim().slice(0, 600),
+    };
+    this.data.operatorNotes = [note, ...this.data.operatorNotes].slice(0, 20);
+    this.save();
+    return note;
+  }
+
+  public removeOperatorNote(id: string): boolean {
+    const before = this.data.operatorNotes.length;
+    this.data.operatorNotes = this.data.operatorNotes.filter((n) => n.id !== id);
+    if (this.data.operatorNotes.length === before) return false;
+    this.save();
+    return true;
   }
 
   public getOpenPositionMeta(key: string): PersistedPositionMeta | undefined {

@@ -61,6 +61,8 @@ export function buildTradeLesson(
     deltaBand: deltaBand(trade.entryFeatures.orderflowDeltaRatio),
     overextensionBand: overextensionBand(trade.entryFeatures.absChange24hPct),
     miss: analysis.whatWeMissed,
+    rootCause: analysis.autopsy?.rootCause,
+    avoidanceRule: analysis.autopsy?.avoidanceRule,
     appliedAdjustments: analysis.styleAdjustments.map((a) => a.split(':')[0].trim()),
   };
 }
@@ -103,12 +105,18 @@ export interface LessonRecall {
   /** Bounded nudge applied to the System-1 probability before the gate. */
   confidenceDelta: number;
   guidance: string;
+  /** The newest autopsy rule on file for this band, if one has been written. */
+  standingRule?: string;
 }
 
 /**
  * Shared-memory read: an incoming candidate is looked up against the pattern the
  * club already learned for this exact setup. Small samples deliberately produce no
  * adjustment, so one lucky trade cannot steer the entry gate.
+ *
+ * A written rule is different from a statistical nudge. One loss with a clear
+ * attribution is worth carrying forward immediately, so the standing rule is recalled
+ * even when the sample count is too small to move the probability.
  */
 export function recallLessons(lessons: TradeLesson[], candidate: {
   symbol: string;
@@ -118,6 +126,8 @@ export function recallLessons(lessons: TradeLesson[], candidate: {
   const key = lessonKey(candidate.side, candidate.features);
   const match = lessons.filter((l) => `${l.side} | ${l.rsiBand} | ${l.deltaBand}` === key);
   const pattern = aggregateLessonPatterns(match)[0];
+  // Lessons are prepended, so the first hit is the most recent.
+  const standingRule = match.find((l) => l.avoidanceRule)?.avoidanceRule;
 
   if (!pattern || pattern.sampleCount < 2) {
     return {
@@ -126,7 +136,10 @@ export function recallLessons(lessons: TradeLesson[], candidate: {
       winRatePct: pattern?.winRatePct || 0,
       netPnlTotal: pattern?.netPnlTotal || 0,
       confidenceDelta: 0,
-      guidance: `No shared history for ${key} yet — deciding on live tape only.`,
+      standingRule,
+      guidance: standingRule
+        ? `STANDING RULE for ${key}: ${standingRule}`
+        : `No shared history for ${key} yet — deciding on live tape only.`,
     };
   }
 
@@ -149,6 +162,8 @@ export function recallLessons(lessons: TradeLesson[], candidate: {
     } trades, $${pattern.netPnlTotal.toFixed(6)} net. System-1 probability lifted 0.02.`;
   }
 
+  if (standingRule) guidance = `${guidance} STANDING RULE: ${standingRule}`;
+
   return {
     key,
     sampleCount: pattern.sampleCount,
@@ -156,5 +171,6 @@ export function recallLessons(lessons: TradeLesson[], candidate: {
     netPnlTotal: pattern.netPnlTotal,
     confidenceDelta: delta,
     guidance,
+    standingRule,
   };
 }

@@ -6,6 +6,8 @@ import type {
   EntryFeatureVector,
   LocalDecisionConfig,
   OpenTradePosition,
+  OperatorDirective,
+  OperatorNote,
   ScannerOperatingState,
   ServerIpReport,
 } from '../types.js';
@@ -20,6 +22,7 @@ import { RestMarketFeed } from './restMarketFeed.js';
 import { IncomeLedger } from './incomeLedger.js';
 import { buildPnlLedger } from './pnlLedger.js';
 import { aggregateLessonPatterns } from '../ai/lessonMemory.js';
+import { describeDirective, findVetoingDirective } from '../ai/operatorDirectives.js';
 import { PositionMonitor1s } from './positionMonitor1s.js';
 import { evaluate15sPullbackStrategy } from './strategy15s.js';
 import { f6, formatOrderQty, maskApiKey } from '../utils/format.js';
@@ -81,6 +84,7 @@ export class HftBotEngine {
       system1Weights: this.stateStore.getSystem1Weights(),
       localConfig: this.stateStore.getLocalDecisionConfig(),
       lessons: this.stateStore.getLessons(),
+      operatorNotes: this.stateStore.getOperatorNotes(),
     });
 
     this.engineRunning = this.stateStore.getEngineRunning();
@@ -344,6 +348,58 @@ export class HftBotEngine {
     this.broadcastSnapshot();
   }
 
+  public getOperatorDirectives(): OperatorDirective[] {
+    return this.stateStore.getOperatorDirectives();
+  }
+
+  public addOperatorDirective(input: {
+    kind: OperatorDirective['kind'];
+    symbol?: string;
+    value?: number;
+    reason?: string;
+  }) {
+    const directive = this.stateStore.addOperatorDirective(input);
+    logger.ai(
+      'AI_CLUB',
+      `Operator standing order accepted and now binding on every entry: ${describeDirective(
+        directive
+      )}${directive.reason ? ` — ${directive.reason}` : ''}`
+    );
+    this.broadcastSnapshot();
+    return directive;
+  }
+
+  public setOperatorDirectiveActive(id: string, active: boolean): boolean {
+    const ok = this.stateStore.setOperatorDirectiveActive(id, active);
+    if (ok) {
+      logger.ai(
+        'AI_CLUB',
+        `Operator standing order ${active ? 're-armed' : 'lifted'} (${id.slice(0, 8)}).`
+      );
+      this.broadcastSnapshot();
+    }
+    return ok;
+  }
+
+  public addOperatorNote(text: string): OperatorNote | null {
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    const note = this.stateStore.addOperatorNote(trimmed);
+    this.aiClub.setOperatorNotes(this.stateStore.getOperatorNotes());
+    logger.ai('AI_CLUB', `Operator briefing passed to the agent club: ${note.text}`);
+    this.broadcastSnapshot();
+    return note;
+  }
+
+  public removeOperatorNote(id: string): boolean {
+    const ok = this.stateStore.removeOperatorNote(id);
+    if (ok) {
+      this.aiClub.setOperatorNotes(this.stateStore.getOperatorNotes());
+      this.broadcastSnapshot();
+    }
+    return ok;
+  }
+
   private isMarginExhausted95(): boolean {
     if (!this.apiConnected) return false;
     const style = this.aiClub.getStyleParams();
@@ -571,6 +627,25 @@ export class HftBotEngine {
     // changed an entry decision is visible in the tape rather than implied.
     if (consensus.lessonKey) {
       logger.ai('AI_CLUB', `Shared memory [${consensus.lessonKey}]: ${consensus.lessonGuidance}`);
+    }
+
+    // Operator standing orders sit above the council: an entry the club approved is
+    // still blocked, and the veto is recorded against the rule that made it.
+    const directiveVeto = findVetoingDirective(this.stateStore.getOperatorDirectives(), {
+      symbol,
+      side,
+      features: stratEval.features,
+      openPositionCount: this.positionMonitor.getOpenPositionsList().length,
+    });
+    if (directiveVeto) {
+      this.stateStore.recordDirectiveApplied(directiveVeto.id);
+      logger.ai(
+        'AI_CLUB',
+        `OPERATOR RULE vetoed ${symbol} ${side} that the AI Club approved — ${describeDirective(
+          directiveVeto
+        )}${directiveVeto.reason ? ` (${directiveVeto.reason})` : ''}`
+      );
+      return;
     }
 
     // Re-check 95% capital ceiling right before order placement
@@ -832,6 +907,10 @@ export class HftBotEngine {
       netPnl,
       grossPnl,
       binanceFees,
+      initialMargin: pos.initialMargin,
+      leverage: pos.leverage,
+      entryPrice: pos.entryPrice,
+      exitPrice,
       finalRoiPct,
       peakRoiPct: Math.max(pos.peakRoiPct, finalRoiPct),
       worstRoiPct: Math.min(pos.worstRoiPct, finalRoiPct),
@@ -968,6 +1047,8 @@ export class HftBotEngine {
       pnlLedger,
       lessons,
       lessonPatterns: aggregateLessonPatterns(lessons),
+      operatorDirectives: this.stateStore.getOperatorDirectives(),
+      operatorNotes: this.stateStore.getOperatorNotes(),
 
       rateTelemetry: this.rateGovernor.getTelemetry(),
       ipReport: this.ipReport,

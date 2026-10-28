@@ -127,6 +127,88 @@ export interface AiCouncilBallot {
   approved: boolean;
 }
 
+/**
+ * The mechanism a loss is attributed to. Each one is provable from the trade record
+ * and each one points at a different knob, which is the whole reason this is a union
+ * rather than a paragraph.
+ */
+export type LossRootCause =
+  | 'EXIT_SLIPPAGE'
+  | 'TRAIL_TOO_LOOSE'
+  | 'FEE_DRAG'
+  | 'MOVE_TOO_SMALL_FOR_FEES'
+  | 'ENTRY_INTO_SPENT_MOVE'
+  | 'ADVERSE_TAKER_FLOW'
+  | 'ENTRY_TOO_EARLY'
+  | 'REGIME_FADED';
+
+export interface LossAutopsy {
+  rootCause: LossRootCause;
+  rootCauseLabel: string;
+  /** Secondary mechanisms present in the same trade, reported but not acted on first. */
+  contributingCauses: LossRootCause[];
+  /** The trade's own numbers, so the narrative can be checked rather than trusted. */
+  evidence: {
+    feeHurdleRoiPct: number;
+    peakRoiPct: number;
+    worstRoiPct: number;
+    finalRoiPct: number;
+    underlyingMovePct: number;
+    mfeGiveBackPct: number;
+    mfeCaptureRatio: number;
+    durationSec: number;
+    leverage: number;
+    rsi15s: number;
+    orderflowDeltaRatio: number;
+    absChange24hPct: number;
+  };
+  whyItHappened: string;
+  /** Filed into shared memory under this setup's key and recalled on the next entry. */
+  avoidanceRule: string;
+  executionUpdate: string;
+}
+
+/**
+ * The instruction an operator can hand the agent club.
+ *
+ * These are deliberately typed rather than free text: a binding rule has to be
+ * enforceable mechanically, and the club must not be able to vote its way around it.
+ * Anything the operator wants said in prose goes in an OperatorNote instead, which is
+ * quoted into agent reasoning but never blocks an order.
+ */
+export type OperatorDirectiveKind =
+  | 'STAND_DOWN_ALL'
+  | 'STAND_DOWN_SYMBOL'
+  | 'BLOCK_LONG'
+  | 'BLOCK_SHORT'
+  | 'MAX_CONCURRENT_POSITIONS'
+  | 'RSI_GATE'
+  | 'MIN_24H_MOVE'
+  | 'MAX_24H_OVEREXTENSION';
+
+export interface OperatorDirective {
+  id: string;
+  createdAt: number;
+  kind: OperatorDirectiveKind;
+  /** Only used by STAND_DOWN_SYMBOL. */
+  symbol?: string;
+  /** Threshold for the numeric kinds; ignored by the boolean ones. */
+  value?: number;
+  /** Operator's own reason, echoed in the veto log so the tape explains itself. */
+  reason: string;
+  active: boolean;
+  /** How many entries this rule has actually blocked. */
+  appliedCount: number;
+  lastAppliedAt: number | null;
+}
+
+/** Free-text briefing. Advisory only — quoted into the agents, never an order gate. */
+export interface OperatorNote {
+  id: string;
+  createdAt: number;
+  text: string;
+}
+
 export interface AiPostMortemAnalysis {
   verdict: 'WIN_OPTIMAL' | 'WIN_EARLY_TRAIL' | 'LOSS_PREMATURE_PULLBACK' | 'LOSS_MOMENTUM_REVERSAL' | 'FEE_DRAG_BREAKEVEN';
   whatWorkedBest: string;
@@ -135,6 +217,11 @@ export interface AiPostMortemAnalysis {
   mfeCaptureRatio: number;
   brierLoss: number;
   agentConsensusSummary: string;
+  /**
+   * Expert attribution, produced for losing trades only. Optional because winning
+   * trades and everything closed before this existed have none.
+   */
+  autopsy?: LossAutopsy;
   /**
    * Per-voter record of the improvement council. Optional because trades closed
    * before the council existed have no ballots — the UI shows that gap instead of
@@ -347,6 +434,10 @@ export interface TradeLesson {
   deltaBand: string;
   overextensionBand: string;
   miss: string;
+  /** Set only on losing trades: the mechanism the autopsy blamed. */
+  rootCause?: LossRootCause;
+  /** The rule the club carries forward for this setup band. */
+  avoidanceRule?: string;
   appliedAdjustments: string[];
 }
 
@@ -405,6 +496,10 @@ export interface DashboardSnapshot {
   pnlLedger: PnlLedger;
   lessons: TradeLesson[];
   lessonPatterns: LessonPattern[];
+  /** Binding standing orders the entry path must obey, with their veto tally. */
+  operatorDirectives: OperatorDirective[];
+  /** Advisory briefings currently in front of the agents. */
+  operatorNotes: OperatorNote[];
 
   // API Rate & System Telemetry
   rateTelemetry: ApiRateTelemetry;

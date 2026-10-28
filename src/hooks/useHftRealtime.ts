@@ -4,6 +4,7 @@ import type {
   DashboardSnapshot,
   LocalDecisionConfig,
   LogEntry,
+  OperatorDirectiveKind,
 } from '../types/hft';
 
 export function useHftRealtime() {
@@ -192,6 +193,45 @@ export function useHftRealtime() {
     if (Array.isArray(data.logs)) setLogs(data.logs);
   }, []);
 
+  const postSetting = useCallback(async (route: string, body?: unknown) => {
+    const res = await fetch(route, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    });
+    const data = await res.json().catch(() => null);
+    if (data?.snapshot) setSnapshot(data.snapshot);
+    if (!res.ok || !data) {
+      return { ok: false, message: data?.message || `${route} failed (HTTP ${res.status}).` };
+    }
+    return data as { ok?: boolean; message?: string };
+  }, []);
+
+  const addDirective = useCallback(
+    (directive: {
+      kind: OperatorDirectiveKind;
+      symbol?: string;
+      value?: number;
+      reason?: string;
+    }) => postSetting('/api/settings/directives', directive),
+    [postSetting]
+  );
+
+  const toggleDirective = useCallback(
+    (id: string, active: boolean) => postSetting('/api/settings/directives/toggle', { id, active }),
+    [postSetting]
+  );
+
+  const addNote = useCallback(
+    (text: string) => postSetting('/api/settings/notes', { text }),
+    [postSetting]
+  );
+
+  const removeNote = useCallback(
+    (id: string) => postSetting('/api/settings/notes/remove', { id }),
+    [postSetting]
+  );
+
   return {
     snapshot,
     logs,
@@ -206,5 +246,9 @@ export function useHftRealtime() {
     updateStyleParams,
     manualClosePosition,
     clearLogs,
+    addDirective,
+    toggleDirective,
+    addNote,
+    removeNote,
   };
 }

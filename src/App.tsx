@@ -26,6 +26,10 @@ export const App: React.FC = () => {
     updateLocalAi,
     manualClosePosition,
     clearLogs,
+    addDirective,
+    toggleDirective,
+    addNote,
+    removeNote,
   } = useHftRealtime();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -149,6 +153,10 @@ export const App: React.FC = () => {
         snapshot={snapshot}
         onClose={() => setAiClubOpen(false)}
         onUpdateLocalAi={updateLocalAi}
+        onAddDirective={addDirective}
+        onToggleDirective={toggleDirective}
+        onAddNote={addNote}
+        onRemoveNote={removeNote}
       />
 
       <SystemLogsDrawer

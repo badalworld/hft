@@ -7,6 +7,9 @@ import type {
   EntryFeatureVector,
   LocalDecisionConfig,
   LessonPattern,
+  LossAutopsy,
+  LossRootCause,
+  OperatorNote,
   StyleMutationRecord,
   System1Weights,
   TradeLesson,
@@ -19,6 +22,7 @@ import {
   prependLesson,
   recallLessons,
 } from './lessonMemory.js';
+import { diagnoseLoss, feeHurdleRoiPct } from './lossAutopsy.js';
 import {
   castBallots,
   consensusLine,
@@ -117,6 +121,7 @@ const EntryStateAnnotation = Annotation.Root({
   lessonSamples: Annotation<number>,
   lessonWinRatePct: Annotation<number>,
   confidenceDelta: Annotation<number>,
+  operatorBriefing: Annotation<string>,
   regimeApproved: Annotation<boolean>,
   sniperApproved: Annotation<boolean>,
   system1Approved: Annotation<boolean>,
@@ -133,6 +138,10 @@ const PostMortemStateAnnotation = Annotation.Root({
   netPnl: Annotation<number>,
   grossPnl: Annotation<number>,
   binanceFees: Annotation<number>,
+  initialMargin: Annotation<number>,
+  leverage: Annotation<number>,
+  entryPrice: Annotation<number>,
+  exitPrice: Annotation<number>,
   finalRoiPct: Annotation<number>,
   peakRoiPct: Annotation<number>,
   worstRoiPct: Annotation<number>,
@@ -141,6 +150,7 @@ const PostMortemStateAnnotation = Annotation.Root({
   features: Annotation<EntryFeatureVector>,
   lessonKey: Annotation<string>,
   verdict: Annotation<AiPostMortemAnalysis['verdict']>,
+  autopsy: Annotation<LossAutopsy | null>,
   whatWorkedBest: Annotation<string>,
   whatWeMissed: Annotation<string>,
   mfeCaptureRatio: Annotation<number>,
@@ -158,6 +168,8 @@ export class AiAgentClubOrchestrator {
   private localConfig: LocalDecisionConfig;
   /** Shared memory every node reads before it votes or decides. */
   private lessons: TradeLesson[];
+  /** Free-text briefings from the operator. Advisory: quoted into reasoning, never a gate. */
+  private operatorNotes: OperatorNote[];
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private compiledEntryGraph: any;
@@ -170,12 +182,14 @@ export class AiAgentClubOrchestrator {
     system1Weights: System1Weights;
     localConfig: LocalDecisionConfig;
     lessons?: TradeLesson[];
+    operatorNotes?: OperatorNote[];
   }) {
     this.agents = init.agents?.length ? init.agents : createInitialAgents();
     this.styleParams = init.styleParams;
     this.system1Weights = init.system1Weights;
     this.localConfig = init.localConfig;
     this.lessons = init.lessons || [];
+    this.operatorNotes = init.operatorNotes || [];
 
     this.compiledEntryGraph = this.buildEntryStateGraph();
     this.compiledPostMortemGraph = this.buildPostMortemStateGraph();
@@ -195,6 +209,21 @@ export class AiAgentClubOrchestrator {
 
   public hydrateLessons(lessons: TradeLesson[]) {
     this.lessons = lessons;
+  }
+
+  public setOperatorNotes(notes: OperatorNote[]) {
+    this.operatorNotes = notes;
+  }
+
+  public getOperatorNotes(): OperatorNote[] {
+    return this.operatorNotes;
+  }
+
+  /** The freshest briefing, phrased so an agent's log line reads as a quoted instruction. */
+  private briefingLine(): string {
+    const newest = this.operatorNotes[0];
+    if (!newest) return '';
+    return `OPERATOR BRIEFING: ${newest.text}`;
   }
 
   public getStyleParams(): AdaptiveStyleParams {
@@ -248,6 +277,7 @@ export class AiAgentClubOrchestrator {
           lessonSamples: recall.sampleCount,
           lessonWinRatePct: recall.winRatePct,
           confidenceDelta: recall.confidenceDelta,
+          operatorBriefing: this.briefingLine(),
         };
       })
       .addNode('alphaScout', async (state) => {
@@ -260,7 +290,7 @@ export class AiAgentClubOrchestrator {
             ok ? 'REGIME_PASS' : 'OVEREXTENDED_CAUTION'
           } | Hermes: ${state.lessonKey} ${f6(state.lessonWinRatePct)}% win / ${
             state.lessonSamples
-          } trades`
+          } trades${state.operatorBriefing ? ` | ${state.operatorBriefing}` : ''}`.slice(0, 200)
         );
         return {
           regimeApproved: ok,
@@ -359,7 +389,9 @@ export class AiAgentClubOrchestrator {
         );
         return {
           recommendedStartLeverage: startLev,
-          summaryNote: `AI Club Consensus PASS (score=${f6(state.aiConfidence)}, start ${startLev}x)`,
+          summaryNote: `AI Club Consensus PASS (score=${f6(state.aiConfidence)}, start ${startLev}x)${
+            state.operatorBriefing ? ` — briefed: ${state.operatorBriefing}` : ''
+          }`,
         };
       })
       .addEdge(START, 'sharedMemoryRecall')
@@ -438,8 +470,40 @@ export class AiAgentClubOrchestrator {
           )}%) snapped back.`;
         }
 
+        const autopsy = wonNet
+          ? null
+          : diagnoseLoss({
+              symbol: state.symbol,
+              side: state.side,
+              netPnl: state.netPnl,
+              grossPnl: state.grossPnl,
+              binanceFees: state.binanceFees,
+              initialMargin: state.initialMargin,
+              leverage: state.leverage,
+              entryPrice: state.entryPrice,
+              exitPrice: state.exitPrice,
+              finalRoiPct: state.finalRoiPct,
+              peakRoiPct: state.peakRoiPct,
+              worstRoiPct: state.worstRoiPct,
+              durationSec: state.durationSec,
+              exitReason: state.exitReason,
+              features: state.features,
+              params: this.styleParams,
+            });
+
+        if (autopsy) {
+          this.touchAgent(
+            'hermes-evolver',
+            `AUTOPSY ${state.symbol} (${state.side}) ${autopsy.rootCause}: ${autopsy.avoidanceRule}`.slice(
+              0,
+              200
+            )
+          );
+        }
+
         return {
           verdict,
+          autopsy,
           whatWorkedBest,
           whatWeMissed,
           mfeCaptureRatio: mfeRatio,
@@ -480,63 +544,172 @@ export class AiAgentClubOrchestrator {
             0.74,
             'Reward high-accuracy regime while preserving selectivity'
           );
-        } else if (state.verdict === 'FEE_DRAG_BREAKEVEN') {
-          propose(
-            'trailingFloorRoiPct',
-            p.trailingFloorRoiPct + 0.12,
-            3.4,
-            4.5,
-            'Elevate minimum locked trailing floor above round-trip Binance taker fees'
-          );
-        } else if (state.verdict === 'LOSS_PREMATURE_PULLBACK') {
-          propose(
-            'minOrderflowDeltaRatio',
-            p.minOrderflowDeltaRatio + 0.04,
-            1.08,
-            1.75,
-            'Require stronger aggTrade buyer/seller delta confirmation on 15s reversal bar'
-          );
-          if (state.side === 'LONG') {
-            propose(
-              'pullbackRsiLongMax',
-              p.pullbackRsiLongMax - 1.0,
-              40.0,
-              58.0,
-              'Wait for deeper 15s RSI cooldown on LONG pullbacks'
-            );
-          } else {
-            propose(
-              'pullbackRsiShortMin',
-              p.pullbackRsiShortMin + 1.0,
-              42.0,
-              60.0,
-              'Wait for higher 15s RSI relief bounce on SHORT pullbacks'
-            );
+        } else if (state.autopsy) {
+          // A losing trade drafts its proposals from the autopsy's attribution rather
+          // than from a verdict label, so the parameter that moves is the one the
+          // diagnosis actually blamed.
+          const cause: LossRootCause = state.autopsy.rootCause;
+          const hurdle = feeHurdleRoiPct(state.binanceFees, state.initialMargin);
+          const rsiReset = () => {
+            if (state.side === 'LONG') {
+              propose(
+                'pullbackRsiLongMax',
+                p.pullbackRsiLongMax - 1.0,
+                40.0,
+                58.0,
+                'Wait for a deeper 15s RSI cooldown before calling a LONG pullback finished'
+              );
+            } else {
+              propose(
+                'pullbackRsiShortMin',
+                p.pullbackRsiShortMin + 1.0,
+                42.0,
+                60.0,
+                'Wait for a higher 15s RSI relief bounce before calling a SHORT pullback finished'
+              );
+            }
+          };
+
+          switch (cause) {
+            case 'EXIT_SLIPPAGE':
+              // The guard is a price promise; the only lever that keeps it is the
+              // notional we throw at the book when the cascade hits.
+              propose(
+                'maxLeverage',
+                p.maxLeverage - 1,
+                5,
+                15,
+                `Stop filled ${f6(
+                  state.finalRoiPct - p.protectiveStopRoiPct
+                )}% ROI through the guard — position too large for available exit depth`
+              );
+              propose(
+                'cooldownSecondsAfterLoss',
+                p.cooldownSecondsAfterLoss + 45,
+                60,
+                900,
+                'Do not re-enter the same cascade that just slipped through the stop'
+              );
+              break;
+            case 'TRAIL_TOO_LOOSE':
+              propose(
+                'trailingCallbackRoiPct',
+                p.trailingCallbackRoiPct - 0.06,
+                0.65,
+                2.1,
+                `Gave back ${f6(
+                  state.peakRoiPct - state.finalRoiPct
+                )}% of a +${f6(state.peakRoiPct)}% excursion — callback sized for a trend, not a spike`
+              );
+              break;
+            case 'FEE_DRAG':
+              propose(
+                'maxLeverage',
+                p.maxLeverage - 1,
+                5,
+                15,
+                `Round-trip taker costs ${f6(
+                  hurdle
+                )}% of margin ROI at ${f6(
+                  state.leverage
+                )}x; the hurdle falls proportionally with leverage`
+              );
+              propose(
+                'minAiConfidenceScore',
+                p.minAiConfidenceScore + 0.01,
+                0.5,
+                0.74,
+                'Demand higher probability before entering a move that only just clears the fee hurdle'
+              );
+              break;
+            case 'MOVE_TOO_SMALL_FOR_FEES':
+              propose(
+                'maxLeverage',
+                p.maxLeverage - 1,
+                5,
+                15,
+                `Peak +${f6(state.peakRoiPct)}% ROI sat under the ${f6(
+                  hurdle
+                )}% fee hurdle — this band cannot pay for itself at this leverage`
+              );
+              propose(
+                'minAiConfidenceScore',
+                p.minAiConfidenceScore + 0.012,
+                0.5,
+                0.74,
+                'Filter low-energy 15s structures whose full excursion is smaller than the round trip costs'
+              );
+              break;
+            case 'ENTRY_INTO_SPENT_MOVE':
+              propose(
+                'max24hOverextensionPct',
+                p.max24hOverextensionPct - 2.5,
+                45.0,
+                120.0,
+                `Entered after a ${f6(
+                  state.features.absChange24hPct
+                )}% 24h move — over-extension is liquidation fuel, not continuation`
+              );
+              propose(
+                'cooldownSecondsAfterLoss',
+                p.cooldownSecondsAfterLoss + 30,
+                60,
+                900,
+                'Lengthen per-symbol cooldown so a spent move is not re-entered on the first bounce'
+              );
+              break;
+            case 'ADVERSE_TAKER_FLOW':
+              propose(
+                'minConfirmationBodyRatio',
+                p.minConfirmationBodyRatio + 0.02,
+                0.28,
+                0.58,
+                `Delta ${f6(
+                  state.features.orderflowDeltaRatio
+                )}x at RSI ${f6(
+                  state.features.rsi15s
+                )} was exhaustion print, not conviction — require a closed body`
+              );
+              rsiReset();
+              break;
+            case 'ENTRY_TOO_EARLY':
+              propose(
+                'minOrderflowDeltaRatio',
+                p.minOrderflowDeltaRatio + 0.04,
+                1.08,
+                1.75,
+                `MAE ${f6(
+                  state.worstRoiPct
+                )}% before any MFE — the pullback was still in progress at entry`
+              );
+              rsiReset();
+              propose(
+                'minAiConfidenceScore',
+                p.minAiConfidenceScore + 0.015,
+                0.5,
+                0.74,
+                'Increase System-1 probability gate after premature entry loss'
+              );
+              break;
+            case 'REGIME_FADED':
+              if (state.features.absChange24hPct > 55) {
+                propose(
+                  'max24hOverextensionPct',
+                  p.max24hOverextensionPct - 2.5,
+                  45.0,
+                  120.0,
+                  'Filter exhausted extreme 24h movers prone to violent mean-reversion'
+                );
+              }
+              propose(
+                'minConfirmationBodyRatio',
+                p.minConfirmationBodyRatio + 0.02,
+                0.28,
+                0.58,
+                'Demand stronger 15s confirmation candle body conviction'
+              );
+              break;
           }
-          propose(
-            'minAiConfidenceScore',
-            p.minAiConfidenceScore + 0.015,
-            0.5,
-            0.74,
-            'Increase System-1 probability gate after premature entry loss'
-          );
-        } else if (state.verdict === 'LOSS_MOMENTUM_REVERSAL') {
-          if (state.features.absChange24hPct > 55) {
-            propose(
-              'max24hOverextensionPct',
-              p.max24hOverextensionPct - 2.5,
-              45.0,
-              120.0,
-              'Filter exhausted extreme 24h movers prone to violent mean-reversion'
-            );
-          }
-          propose(
-            'minConfirmationBodyRatio',
-            p.minConfirmationBodyRatio + 0.02,
-            0.28,
-            0.58,
-            'Demand stronger 15s confirmation candle body conviction'
-          );
         }
 
         this.touchAgent(
@@ -653,6 +826,7 @@ export class AiAgentClubOrchestrator {
       lessonSamples: 0,
       lessonWinRatePct: 0,
       confidenceDelta: 0,
+      operatorBriefing: '',
       regimeApproved: false,
       sniperApproved: false,
       system1Approved: false,
@@ -687,6 +861,10 @@ export class AiAgentClubOrchestrator {
     netPnl: number;
     grossPnl: number;
     binanceFees: number;
+    initialMargin: number;
+    leverage: number;
+    entryPrice: number;
+    exitPrice: number;
     finalRoiPct: number;
     peakRoiPct: number;
     worstRoiPct: number;
@@ -702,6 +880,7 @@ export class AiAgentClubOrchestrator {
       ...params,
       lessonKey: '',
       verdict: 'WIN_OPTIMAL',
+      autopsy: null,
       whatWorkedBest: '',
       whatWeMissed: '',
       mfeCaptureRatio: 0,
@@ -733,6 +912,7 @@ export class AiAgentClubOrchestrator {
       styleAdjustments,
       mfeCaptureRatio: out.mfeCaptureRatio,
       brierLoss: out.brierLoss,
+      autopsy: out.autopsy || undefined,
       councilBallots: ballots,
       nextStep: nextStepLine(ballots, ctx),
       agentConsensusSummary: `${consensusLine(ballots)} || RLCD #${
@@ -767,12 +947,22 @@ export class AiAgentClubOrchestrator {
 
     logger.ai(
       'AI_CLUB',
-      `Post-Mortem [${params.symbol} ${params.side}] Verdict=${out.verdict} | NetPNL=$${f6(
-        params.netPnl
-      )} | Council=${ballots.length} ballot(s), ${styleAdjustments.length} applied`,
+      `Post-Mortem [${params.symbol} ${params.side}] Verdict=${out.verdict}${
+        out.autopsy ? ` Autopsy=${out.autopsy.rootCause}` : ''
+      } | NetPNL=$${f6(params.netPnl)} | Council=${ballots.length} ballot(s), ${
+        styleAdjustments.length
+      } applied`,
       {
         whatWorkedBest: out.whatWorkedBest,
         whatWeMissed: out.whatWeMissed,
+        autopsy: out.autopsy
+          ? {
+              rootCause: out.autopsy.rootCause,
+              why: out.autopsy.whyItHappened,
+              rule: out.autopsy.avoidanceRule,
+              execution: out.autopsy.executionUpdate,
+            }
+          : undefined,
         styleAdjustments,
         ballots: ballots.map((b) => `${b.change} -> ${b.approved ? 'FOR' : 'REJECTED'} (${b.forCount}/${b.votes.length})`),
         nextStep: analysis.nextStep,

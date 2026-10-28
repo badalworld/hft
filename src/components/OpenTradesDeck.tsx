@@ -154,9 +154,9 @@ export const OpenTradesDeck: React.FC<OpenTradesDeckProps> = ({
                       <td className="py-3 pl-4 pr-3">
                         <div className="flex items-center gap-2">
                           <span
-                            className={`h-2.5 w-2.5 rounded-full ${
-                              pos.trailingActive ? 'led-orchid' : 'led-mint'
-                            }`}
+                            className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                              netPositive ? 'led-mint led-blink' : 'led-coral led-blink-alarm'
+                            } ${pos.trailingActive ? 'led-armed-ring' : ''}`}
                           />
                           <div>
                             <div className="font-mono-num text-xs font-bold text-white">

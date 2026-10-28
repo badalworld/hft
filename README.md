@@ -3,7 +3,7 @@
 
   <br />
 
-  [![Version](https://img.shields.io/badge/Version-1.3.0-6B403C?style=for-the-badge)](#whats-new-in-v130)
+  [![Version](https://img.shields.io/badge/Version-1.4.0-6B403C?style=for-the-badge)](#whats-new-in-v140)
   [![Exchange](https://img.shields.io/badge/Exchange-Binance%20Portfolio%20Margin%20(UM)-F0B90B?style=for-the-badge)](https://www.binance.com/en/futures)
   [![Execution](https://img.shields.io/badge/Execution-15s%20Candles%20%7C%201s%20Monitor-ADEBB3?style=for-the-badge)](#6-real-time-15-second-candle-engine--pullback-strategy)
   [![Transport](https://img.shields.io/badge/Transport-WebSocket%20%2B%20Auto%20REST%20Failover-8FD6FF?style=for-the-badge)](#4-market-data-transport-resilience-ws--rest-failover)
@@ -25,7 +25,37 @@
 
 ---
 
-## What's New in `v1.3.0`
+## What's New in `v1.4.0`
+
+**The console now reads like an instrument, and every losing trade has to explain itself in numbers before the club is allowed to change anything.** Version 1.4.0 replaces the two headline numbers with drawn seven-segment LED readouts, makes running P&L visible on each open slot, and — the part that actually changes behaviour — turns the loss post-mortem into a typed root-cause diagnosis whose avoidance rule is recalled on the next entry in the same setup band. It also opens a direct channel from the operator to the agents, with a hard split between what binds and what only informs.
+
+### The arithmetic this release is built around
+
+Fees are charged on **notional** while ROI is measured on **margin**, so the break-even hurdle in ROI terms is `2 × taker rate × leverage`:
+
+| Leverage | Round-trip taker fee | Hurdle just to break even |
+| :--- | :--- | :--- |
+| `10x` | `0.100000%` of notional | **`+1.000000%` ROI** |
+| `15x` | `0.100000%` of notional | **`+1.500000%` ROI** |
+
+A `+$1.997942613` margin position at `10x` printed `+$5.586338%` ROI at its peak, exited the trail at `+1.666715%` ROI, paid `$0.019863449999999998` in fees and banked **`+$0.013436550` net**. That is the whole problem in one row, and the diagnosis below is what forces the system to answer it.
+
+Captured live from `snapshot.pnlLedger.stats` at `2026-10-28T22:30:48Z` on this account: `78` settled closes, `46` winners, `58.974359%` win rate, `$1.563932` paid in Binance fees against `-$2.711121` net. **Fees are `57.7%` of the drawdown, and larger than the pre-fee result of `-$1.147189`.** The average winner netted `+$0.087500` against an average loser of `-$0.210504` — a `2.41:1` asymmetry that needs a `70.6%` win rate to break even while the book prints `58.974359%`. Lowering leverage lowers the hurdle in proportion, which is why the autopsy treats `MOVE_TOO_SMALL_FOR_FEES` as an entry defect and not a cost of doing business.
+
+| Change | Detail |
+| :--- | :--- |
+| **Seven-segment LED console** | Start Balance and Current Equity are no longer typeset — they are drawn. `src/components/SevenSegmentNumber.tsx` builds segments `a`–`g` as bevelled hexagonal polygons in one hidden `<defs>` sheet, and each digit column is an `<svg>` viewport clipping an 11-glyph strip that rolls with a framer-motion spring (`stiffness 190`, `damping 26`, staggered right-to-left at `18ms` per column so the least-significant digit settles last). Equity reads **mint `#ADEBB3` while ahead of the locked start balance and coral `#FF857A` once behind it**; start balance stays orchid. Same footprint as the text it replaced — neither card reflows — and `prefers-reduced-motion` swaps the animation for a static transform. The stroke is deliberately thin against digit height: with a fat stroke the two right-hand segments shrink and `1` reads as a colon. |
+| **Open slots blink their own P&L** | Each row in `OpenTradesDeck` now carries an LED driven by **net** PNL, not gross: slow `1.5s` mint pulse while a position is net-positive, fast `0.8s` coral alarm while net-negative. Trailing-stop arming keeps its own independent signal — an orchid ring around the LED — so "in profit" and "predator is armed" are no longer the same light. Both pulses respect `prefers-reduced-motion`. |
+| **Loss autopsy: 8 typed root causes** | `server/ai/lossAutopsy.ts` diagnoses every losing close against measured evidence rather than a mood. `FEE_DRAG`, `MOVE_TOO_SMALL_FOR_FEES`, `ENTRY_TOO_EARLY`, `ENTRY_INTO_SPENT_MOVE`, `ADVERSE_TAKER_FLOW`, `TRAIL_TOO_LOOSE`, `EXIT_SLIPPAGE`, `REGIME_FADED` — each with the numbers that prove it, a secondary list of contributing causes, and three outputs: *why it happened*, an *avoidance rule*, and an *execution update*. Classification is ordered by causation, not by size: a position that went `-$4%` deep before it ever went anywhere lost to its **entry**, not to its fees — the fee hurdle only explains losses on trades that actually moved. |
+| **The rule is carried, not filed** | `improvementDraft` now switches on `rootCause`, so the parameter that moves is the one that was blamed. The avoidance rule is written into lesson memory and `recallLessons` returns it as `STANDING RULE for SIDE \| RSI band \| DELTA band` on the next entry in that band — a post-mortem that changes a decision, not a report you can scroll past. |
+| **Operator briefing — two tiers, and they are not the same tier** | Binding standing orders (`STAND_DOWN_ALL`, `STAND_DOWN_SYMBOL`, `BLOCK_LONG`, `BLOCK_SHORT`, `MAX_CONCURRENT_POSITIONS`, `RSI_GATE`, `MIN_24H_MOVE`, `MAX_24H_OVEREXTENSION`) are evaluated **mechanically after the council approves**, so a veto log line means the AI Club genuinely wanted the trade and was overruled: *"OPERATOR RULE vetoed X LONG that the AI Club approved — Maximum 24h move before it is too late: 45.000000% (the move is spent)"*. Each rule counts how many entries it blocked. Advisory free-text notes are quoted into Alpha Scout and Leverage Architect before they vote — and can never gate an order. English is not parsed into trading logic on purpose: a rule that cannot be misread is a rule that cannot be quietly ignored. |
+
+> **Verification status, stated separately.** The LED readouts and the blinking slot LEDs are live-verified on this account right now — the readouts were measured glyph-by-glyph against `/api/snapshot` (`13.972454` and `11.370420` rendered exactly, including the roll caught mid-frame), and all five open slots were observed pulsing coral-fast with one mint-slow, matching their real net P&L. The autopsy, the standing-rule recall, and the veto path are proven by `npm test` (now **8 groups**): a fixture that goes `-$10.2%` before ever printing `+0.8%` must diagnose `ENTRY_TOO_EARLY`, its rule must be recalled on the next entry in the band, an `RSI_GATE` must veto a LONG the club approved and increment its counter, a lifted rule must stop vetoing, and a briefing note must **not** change an approval. The directive and note HTTP routes were exercised against an isolated, credential-free instance of the new server — add, toggle, reject-on-bad-input, and persistence across a restart including a vault written before these fields existed. What has **not** yet been seen on screen is the autopsy panel itself: the running engine predates this code, so no closed trade on this account carries an `autopsy` field yet. It renders on the first losing close after the backend restarts.
+
+<details>
+<summary><b>What's New in <code>v1.3.0</code> — settled income, PNL Ledger, shared memory, improvement council</b></summary>
+
+<br />
 
 **The bot now knows what it earned, remembers what it learned, and never leaves a cooled asset in the way.** Version 1.3.0 adds the settled-outcome layer the strategy was missing: real exchange income, a per-close PNL chart, shared memory between agents, and a council that has to agree before it touches a parameter.
 
@@ -41,6 +71,8 @@
 | **Self-tests: 5 → 7 groups** | `npm test` now also proves council integrity (approved ballots equal the applied adjustments, every approval carries ≥2 of 3 votes), that shared memory measurably moves the entry gate by exactly `-0.06`, that a cooled symbol is evicted and backfilled by the next-ranked mover and then displaced again on recovery, and the ledger arithmetic over a mixed long/short history. |
 
 > **Verification status, stated separately.** Nothing in this table is claimed from code review. The PNL Ledger, income ledger and funding attribution are live-verified against real settled data on this account, and the shared-memory recall and the council ballot have both ruled in production — five ballots cast, one tightening approved 3/3 and four loosenings rejected 1/3. The scanner substitution is verified by the self-tests and has not yet had a cooled asset to evict on this account. See [§9](#9-zero-cost-self-learning-ai-agent-club) for the ballots and [§2](#2-execution-ledger--live-verified) for the ledger.
+
+</details>
 
 <details>
 <summary><b>What's New in <code>v1.2.0</code> — Market data honesty: WS liveness watchdog + auto REST failover</b></summary>
@@ -105,14 +137,14 @@ Every claim below was observed on a live, armed, real-money session — not asse
 | Claim | Evidence |
 | :--- | :--- |
 | **Real orders reach production Binance** | Engine placed `BANKUSDT` `3589019958`, `NILUSDT` `1883047383`, `CAPUSDT` `686718001`, `ONUSDT` `1499115384` within ~70s of arming. |
-| **Full round trips open, manage and close** | 44 completed round trips across 20 distinct symbols (`ONUSDT`, `XANUSDT`, `TAGUSDT`, `FIGHTUSDT`, `BANKUSDT`, `NILUSDT`, `CAPUSDT`, `BLESSUSDT`, …); 6 open concurrently at peak. |
-| **Both exit paths fire** | 29 closes via `TRAILING_STOP_HIT`, 15 via `PROTECTIVE_STOP_LOSS` — the profit predator and the risk guardrail are both live code, not dead branches. |
+| **Full round trips open, manage and close** | `78` completed round trips across `24` distinct symbols (`ONUSDT`, `XANUSDT`, `TAGUSDT`, `FIGHTUSDT`, `BANKUSDT`, `NILUSDT`, `CAPUSDT`, `BLESSUSDT`, …); 6 open concurrently at peak. |
+| **Both exit paths fire** | Of those 78: `48` closed on `TRAILING_STOP_HIT`, `29` on `PROTECTIVE_STOP_LOSS`, `1` reported as `EXTERNAL_OR_EXCHANGE_CLOSE`. The profit predator and the risk guardrail are both live code, not dead branches. `46` of the 48 trailing exits banked a positive net — and the other 2 trailed out and *still* lost money to fees, which is the `MOVE_TOO_SMALL_FOR_FEES` case the v1.4.0 autopsy exists to name. |
 | **PNL is fee-aware, not gross-fiction** | Net PNL booked after real `/papi/v1/um/commissionRate` taker fees on both legs. One trade exposed the difference exactly: `+0.013476` gross, `0.020055` fees, **`-0.006579` net** — verdict `FEE_DRAG_BREAKEVEN`. |
 | **The 95% capital cap engages and halts entries** | Scanner reached `PAUSED_MARGIN_FULL` at `85.769063%` pool utilization, stopped opening new trades, and kept managing the live ones. |
 | **Strategy logic is genuinely varied, not degenerate** | Across the 40-asset scanner, sampled three times consecutively and stable: `rsi15s` → **39 distinct values**, `pullbackDepthPct` → 40, `orderflowDeltaRatio` → 37, `candleCount15s` → 29, and **zero** assets pinned at the degenerate `50.000000`. Stages observed: `COOLDOWN`, `MONITORING`, `PULLBACK_DETECTED`, `CONFIRMED_SIGNAL`, `IN_POSITION`. |
-| **Self-heals a blocked WebSocket** | REST feed engaged with no operator action and restored candle diversity from the flat `79 / 50.000000 / 0 / 1.000000` dead state. Currently running in fallback — `wsConnected: false`, weight `1,036 / 2,400` — and the strategy is still producing varied, actionable diagnostics on all 40 assets. |
-| **AI Club genuinely learns** | 39 consecutive post-mortems, 37 persisted style mutations, each recording the parameter and its value before and after. `minAiConfidenceScore` walked `0.560 → 0.552 → 0.544 → 0.536 → 0.551 → 0.566` across the run, and after two premature-entry losses Hermes tightened three gates at once — `minOrderflowDeltaRatio 1.180 → 1.220`, `pullbackRsiShortMin 48 → 49`, `minAiConfidenceScore 0.536 → 0.551` — then raised `trailingFloorRoiPct 3.650 → 3.770` in response to the fee-drag breakeven. |
-| **Type-safe & verified** | `npm run typecheck` → exit 0. All 7 self-test suites → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
+| **Self-heals a blocked WebSocket** | REST feed engaged with no operator action and restored candle diversity from the flat `79 / 50.000000 / 0 / 1.000000` dead state. Still running in fallback as of `2026-10-28T22:30:48Z` — `wsConnected: false`, weight `765 / 2,400`, mean REST round trip `315 ms` — and the strategy is still producing varied, actionable diagnostics on all 40 assets. |
+| **AI Club genuinely learns** | Across the first run: 39 consecutive post-mortems, 37 persisted style mutations, each recording the parameter and its value before and after. `minAiConfidenceScore` walked `0.560 → 0.552 → 0.544 → 0.536 → 0.551 → 0.566`, and after two premature-entry losses Hermes tightened three gates at once — `minOrderflowDeltaRatio 1.180 → 1.220`, `pullbackRsiShortMin 48 → 49`, `minAiConfidenceScore 0.536 → 0.551` — then raised `trailingFloorRoiPct 3.650 → 3.770` in response to the fee-drag breakeven. The full ledger of what the loop has produced since is in [§9](#9-zero-cost-self-learning-ai-agent-club). |
+| **Type-safe & verified** | `npm run typecheck` → exit 0. All 8 self-test suites → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
 
 ---
 
@@ -120,25 +152,25 @@ Every claim below was observed on a live, armed, real-money session — not asse
 
 ### Cumulative live ledger
 
-Every round trip the engine has settled on a funded, armed session, read straight from `snapshot.pnlLedger.stats` (the same numbers the **PNL Ledger** panel renders):
+Every round trip the engine has settled on a funded, armed session.
 
-Captured live from `snapshot.pnlLedger.stats` at `2026-10-28T21:35:46Z` — the same numbers the **PNL Ledger** panel renders. It moves with every close; the panel is always current.
+Captured live from `snapshot.pnlLedger.stats` at `2026-10-28T22:30:48Z` — the same numbers the **PNL Ledger** panel renders. It moves with every close; the panel is always current, so this table is a photograph, not the reading.
 
 | Readout | Value |
 | :--- | ---: |
-| Total trades | `44` |
-| Win trades / loss trades | `27` / `17` |
-| **Win rate** | `61.363636%` |
-| Long quantity / win rate | `39` / `64.102564%` |
-| Short quantity / win rate | `5` / `40.000000%` |
-| Gross PNL | `-$0.085683` |
-| Total Binance platform fees | `-$0.885331` |
+| Total trades | `78` |
+| Win trades / loss trades | `46` / `32` |
+| **Win rate** | `58.974359%` |
+| Long quantity / win rate | `70` / `60.000000%` |
+| Short quantity / win rate | `8` / `50.000000%` |
+| Gross PNL | `-$1.147189` |
+| Total Binance platform fees | `-$1.563932` |
 | Funding fees settled on bot symbols | `$0.000000` |
-| **Net PNL after fees** | **`-$0.971014`** |
-| Best / worst close (net) | `+$0.258004` / `-$0.260340` |
-| Avg win / avg loss (net) | `+$0.091588` / `-$0.202582` |
+| **Net PNL after fees** | **`-$2.711121`** |
+| Best / worst close (net) | `+$0.258004` / `-$0.309310` |
+| Avg win / avg loss (net) | `+$0.087500` / `-$0.210504` |
 
-> **Read this honestly.** Win rate and net PNL disagree, and the reason is in the last two rows: the average loss is `2.2×` the average win. Being right 61 times in 100 does not pay for a `-$0.202582` average loser next to a `+$0.091588` average winner. The table is an accounting record, not a performance claim — strategy edge remains an open question, and fees alone (`$0.885331`) are more than `10×` the entire gross result.
+> **Read this honestly.** Win rate and net PNL disagree, and the reason is in the last two rows: the average loss is `2.41×` the average win, so this payoff needs a `70.6%` win rate to break even and the book prints `58.974359%`. Being right 59 times in 100 does not pay for a `-$0.210504` average loser next to a `+$0.087500` average winner. The table is an accounting record, not a performance claim — strategy edge remains an open question, and fees alone (`$1.563932`) exceed the entire gross result of `-$1.147189`. This is exactly the asymmetry [§9](#9-zero-cost-self-learning-ai-agent-club)'s loss autopsy is built to attack.
 
 ### First continuous session, in close order
 
@@ -410,6 +442,32 @@ Entry is now a six-node graph: `START → sharedMemoryRecall → alphaScout → 
 
 The delta is bounded on purpose. Memory nudges a decision; it does not get to run the book.
 
+### Every loss gets an autopsy (`server/ai/lossAutopsy.ts`)
+
+A verdict label like `LOSS_PREMATURE_PULLBACK` describes a shape, not a cause, and a cause is what has to be fixed. Losing closes are now diagnosed against their own measured evidence:
+
+| `rootCause` | What the evidence has to say | What it changes |
+| :--- | :--- | :--- |
+| `EXIT_SLIPPAGE` | Stop fired more than `1%` ROI past its line | Stop placement / slippage budget, not the entry |
+| `TRAIL_TOO_LOOSE` | Trail armed and gave back more than `40%` of the peak | `trailingFloorRoiPct` |
+| `FEE_DRAG` | Gross was positive, net was not | Fee hurdle vs `minAiConfidenceScore` |
+| `ENTRY_TOO_EARLY` | Went ≥`-4%` ROI before it ever printed `+2%` | RSI reset requirement at entry |
+| `MOVE_TOO_SMALL_FOR_FEES` | Peaked *below* the fee hurdle — measured as `fees ÷ margin`, whose theoretical form is `2 × taker × leverage` | Minimum expected-move filter |
+| `ADVERSE_TAKER_FLOW` | The tape was selling into the long (or buying into the short) | `minOrderflowDeltaRatio` |
+| `ENTRY_INTO_SPENT_MOVE` | Sub-60s hold under `+1%`, or a counter-move on a `≥45%` 24h runner | `max24hOverextensionPct` |
+| `REGIME_FADED` | Nothing above explains it — the setup simply stopped paying | Style weighting |
+
+Order matters and is deliberate: the hurdle only explains a loss on a trade that *actually moved*, so a position that went deep before it ever went anywhere is charged to its entry, not to its fees. Each diagnosis emits three fields — *why it happened* (with the numbers), an *avoidance rule*, and an *execution update* — and the avoidance rule is written into the lesson so the next entry in that `SIDE | RSI band | DELTA band` reads it back as `STANDING RULE`. `improvementDraft` then proposes against `rootCause`, so the parameter that moves is the one that was blamed.
+
+### Talking to the club (`server/ai/operatorDirectives.ts`)
+
+The operator channel is split into two tiers because they are not the same kind of thing:
+
+- **Binding standing orders** are typed and evaluated mechanically *after* the council approves an entry. Eight kinds: `STAND_DOWN_ALL`, `STAND_DOWN_SYMBOL`, `BLOCK_LONG`, `BLOCK_SHORT`, `MAX_CONCURRENT_POSITIONS`, `RSI_GATE`, `MIN_24H_MOVE`, `MAX_24H_OVEREXTENSION`. A veto therefore always means the AI Club wanted the trade and was overruled, and the tape says so: `OPERATOR RULE vetoed STARUSDT LONG that the AI Club approved — Maximum 24h move before it is too late: 45.000000% (the move is spent)`. Each rule accumulates an `appliedCount`, so you can see whether a rule is protecting capital or just sitting there.
+- **Advisory briefings** are free text. They are quoted into Alpha Scout and Leverage Architect before they vote and appear in the entry summary as `briefed: OPERATOR BRIEFING: …` — but they cannot block an order.
+
+English is not parsed into trading logic on purpose. A rule that cannot be misread is a rule that cannot be quietly argued past, and a hunch expressed in prose should inform a judge, not replace one.
+
 ### Nothing changes without a vote (`server/ai/improvementCouncil.ts`)
 
 Post-mortem is now `forensicAuditor → improvementDraft → councilVote → applyConsensus → rlcdCalibration`. Each drafted mutation is balloted by three named seats:
@@ -424,11 +482,12 @@ Post-mortem is now `forensicAuditor → improvementDraft → councilVote → app
 
 ### What the loop has actually produced so far
 
-This is not a demo mode, and the artifacts are inspectable on disk rather than asserted here. From the live session in [§2](#2-execution-ledger--live-verified):
+This is not a demo mode, and the artifacts are inspectable on disk rather than asserted here. Counted from the live vault and the same `2026-10-28T22:30:48Z` snapshot as [§2](#2-execution-ledger--live-verified):
 
-- **44 of 44** settled closes carry a real post-mortem (`verdict`, `whatWorkedBest`, `whatWeMissed`, `styleAdjustments`, `mfeCaptureRatio`, `brierLoss`).
-- **38 style mutations** are appended to the persistent ledger — each records the parameter, its value before, its value after, and the trade that justified it. `trailingFloorRoiPct` `3.650000 → 3.770000`, `minAiConfidenceScore` `0.544 → 0.536`, `max24hOverextensionPct → 82.500000` are live values, not defaults.
-- **44 contrastive training pairs** written to `./data/nimble_kev_training_pairs.jsonl`, with the entry feature snapshot (`orderflowDeltaRatio`, `rsi15s`, `pullbackDepthPct`) captured at the moment of entry so the post-mortem compares against the *decision input*, not the current market.
+- **78 of 78** settled closes carry a real post-mortem (`verdict`, `whatWorkedBest`, `whatWeMissed`, `styleAdjustments`, `mfeCaptureRatio`, `brierLoss`).
+- **55 style mutations** are appended to the persistent ledger — each records the parameter, its value before, its value after, and the trade that justified it. `trailingFloorRoiPct` `3.650000 → 3.770000`, `minAiConfidenceScore` `0.544 → 0.536`, `max24hOverextensionPct → 82.500000` are live values, not defaults. The dashboard shows the most recent 30.
+- **78 contrastive training pairs** written to `./data/nimble_kev_training_pairs.jsonl`, one per settled close, with the entry feature snapshot (`orderflowDeltaRatio`, `rsi15s`, `pullbackDepthPct`) captured at the moment of entry so the post-mortem compares against the *decision input*, not the current market.
+- **39 lessons across 7 setup bands** in shared memory (`snapshot.lessonPatterns`), read back on every candidate before an agent votes.
 - All of it at **`$0.00` inference cost** — no LLM call is made on either path. Inspect the mutated set any time in `snapshot.styleParams`.
 
 ### The council has ruled in production
@@ -462,6 +521,17 @@ Designed around a clean, focused hardware console aesthetic paired with the **Lo
 | **Ledger Brass** | `#D9A441` | Reserved for the PNL Ledger alone: the zero rule on the Trellis, the fee/funding readouts, and the scanner's substitution chip. One accent, one meaning — money that has actually settled. |
 
 The primary screen remains pure and distraction-free—displaying **only** your **Start Balance**, **Current Equity**, **Open Trades**, and **40-Asset Market Scanner**—while **PNL Ledger**, **AI Club**, **System & Error Logs**, and **Vault Settings & Whitelist IPs** open cleanly via physical tactile switches in the header.
+
+### The two big numbers are drawn, not typeset
+
+Start Balance and Current Equity are seven-segment LED readouts (`src/components/SevenSegmentNumber.tsx`). Segments `a`–`g` are bevelled hexagonal polygons defined once in a hidden `<defs>` sheet; every digit column is its own `<svg>` viewport clipping an 11-glyph strip that rolls into place on a spring, staggered right-to-left so the least-significant digit settles last — the way a mechanical odometer and an LED panel both behave.
+
+- **Equity changes colour on its own meaning**: mint `#ADEBB3` while ahead of the locked start balance, coral `#FF857A` once behind it. Start balance stays orchid — it is a reference, not a result.
+- **Nothing reflows.** The readouts occupy the same line box the text used; glyph height is driven by one media query (`26px` ≥`640px`, `22px` below).
+- **A screen reader never sees segments.** Each readout carries `aria-label="Current equity $11.370420 USDT, behind start balance"`, and every glyph is `aria-hidden`.
+- **`prefers-reduced-motion` renders a static transform** instead of animating, and the slot LEDs stop pulsing.
+
+Open-trade slots carry their own signal: a slow `1.5s` mint pulse while the position is net-positive, a fast `0.8s` coral alarm while net-negative, driven by **net** PNL after fees — because a position that is gross-positive and net-negative is losing money. Trailing-stop arming keeps a separate orchid ring so "in profit" and "the predator is armed" are not the same light doing two jobs.
 
 ### The Trellis (`PNL Ledger`)
 
@@ -646,6 +716,10 @@ Out of the box, **HFT** uses its built-in calibrated **System-1 RLCD Engine** (`
 | `POST /api/settings/bind-ip` | Pin outbound Binance HTTP/WS sockets to a specific local NIC IPv4 (`{ localAddress }`) |
 | `POST /api/settings/local-ai` | Switch System-1 runtime (`builtin`, `ollama_nimble`, `laya_http`, `kev_http`) |
 | `POST /api/settings/style-params` | Override the live self-mutated strategy parameter set (trailing floor/callback, protective stop, RSI bands, orderflow & AI-conviction minimums). Read current values from `snapshot.styleParams` |
+| `POST /api/settings/directives` | Bind a standing order the entry path must obey: `{ kind, symbol?, value?, reason? }`. Rejects an unknown `kind`, a non-`USDT` pair for `STAND_DOWN_SYMBOL`, and a missing threshold for the four numeric kinds (`400`). Read back from `snapshot.operatorDirectives` |
+| `POST /api/settings/directives/toggle` | Lift or re-activate a rule (`{ id, active }`) — a lifted rule is removed from the veto path, not just greyed out |
+| `POST /api/settings/notes` | Add an advisory briefing (`{ text }`) that is quoted into the agents on every entry. Read back from `snapshot.operatorNotes` |
+| `POST /api/settings/notes/remove` | Withdraw a briefing (`{ id }`) |
 | `POST /api/positions/close` | Immediately market-close an open trade (`{ symbol, positionSide }`) |
 | `GET /api/logs` | Query structured execution, API, AI, and error logs |
 | `GET /api/logs/export` | Download complete plain-text `.log` diagnostic file |
@@ -676,18 +750,24 @@ hft/
 │   ├── types.ts                  # Strict domain & telemetry TypeScript definitions
 │   ├── ai/
 │   │   ├── system1Primitives.ts  # System-1 RLCD engine, Brier updates & Nimble/Laya/Kev adapters
-│   │   └── agentClubGraph.ts     # @langchain/langgraph 5-Agent Entry & Post-Mortem StateGraphs
+│   │   ├── agentClubGraph.ts     # @langchain/langgraph 5-Agent Entry & Post-Mortem StateGraphs
+│   │   ├── lessonMemory.ts       # Per-setup lesson bands, standing-rule recall & confidence delta
+│   │   ├── improvementCouncil.ts # Three-seat ballot: two of three FOR votes before a parameter moves
+│   │   ├── lossAutopsy.ts        # Typed loss attribution + the 2 × taker × leverage fee-hurdle math
+│   │   └── operatorDirectives.ts # Binding standing orders, evaluated mechanically after council approval
 │   ├── binance/
 │   │   ├── rateGovernor.ts       # Priority-tiered per-host API weight & order governor (FAPI + PAPI buckets)
 │   │   ├── restClient.ts         # Keep-Alive HMAC-SHA256 client: signed -> papi, public market data -> fapi
 │   │   ├── wsStreamManager.ts    # fstream WS manager: rotating edge DNS + frame-staleness watchdog + liveness-based telemetry
 │   │   └── candleBuilder15s.ts   # 15s OHLCV + Orderflow Delta aggregator · seals only elapsed windows, never fabricates bars
 │   ├── engine/
-│   │   ├── stateStore.ts         # Atomic encrypted vault & persistent Start Balance / AI brain
+│   │   ├── stateStore.ts         # Atomic encrypted vault & persistent Start Balance / AI brain / standing orders
 │   │   ├── restMarketFeed.ts     # REST standby feed: 1s prices · 10s 24h · round-robin tape sweep + trade-ID dedup
 │   │   ├── marketScanner.ts      # Top-40 (20 Pos / 20 Neg) 24h USDT-M scanner + 95% pause logic
 │   │   ├── strategy15s.ts        # 15s Pullback + Bullish/Bearish Confirmation detector
 │   │   ├── positionMonitor1s.ts  # 1s Open Position check, Binance Fees, Net PNL, 5% ROI Trail & -9.5% Protective Stop
+│   │   ├── incomeLedger.ts       # Settled exchange income: per-symbol funding vs account-wide commission
+│   │   ├── pnlLedger.ts          # Per-close ledger series & win/loss, fee and funding aggregates
 │   │   └── hftBotEngine.ts       # Master HFT orchestrator, transport failover & 10x→15x leverage ladder
 │   └── utils/
 │       ├── cryptoVault.ts        # AES-256-GCM credential encryption at rest
@@ -700,10 +780,13 @@ hft/
 │   ├── components/
 │   │   ├── HftBrandLogo.tsx      # Vector HFT Candlestick + Breakout Arrow logo lockup
 │   │   ├── HeaderChassis.tsx     # Top hardware chassis, data-liveness diode & Master Engine switch
-│   │   ├── EquityBezel.tsx       # Fixed Start Balance & Current Equity OLED bezel + 95% pool bar
-│   │   ├── OpenTradesDeck.tsx    # Live 1s Open Trades table with fees, Net PNL & trailing badge
+│   │   ├── SevenSegmentNumber.tsx# Drawn seven-segment LED readout with spring odometer roll
+│   │   ├── EquityBezel.tsx       # Fixed Start Balance & Current Equity LED bezel + 95% pool bar
+│   │   ├── OpenTradesDeck.tsx    # Live 1s Open Trades table with net-PNL slot LEDs, fees & trailing badge
 │   │   ├── MarketScannerDeck.tsx # Dual-bank 40-asset scanner with 15s pullback/confirmation states
-│   │   ├── AiAgentClubModal.tsx  # 5-Agent LangGraph council, post-mortems & System-1 config
+│   │   ├── AiAgentClubModal.tsx  # 5-Agent council, loss autopsies, shared memory & operator briefing
+│   │   ├── PnlLedgerModal.tsx    # Hand-drawn SVG PNL trellis + volume / accuracy / friction readout bands
+│   │   ├── LotusSelect.tsx       # Portal-mounted tactile dropdown (keyboard driven, viewport aware)
 │   │   ├── SettingsVaultModal.tsx# API credentials vault, Multi-IPv4 whitelist & Start Balance reset
 │   │   └── SystemLogsDrawer.tsx  # Filterable & downloadable execution/error log console
 │   ├── hooks/

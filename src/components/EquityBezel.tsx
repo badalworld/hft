@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { Lock, TrendingUp, Wallet, ShieldAlert } from 'lucide-react';
 import type { DashboardSnapshot } from '../types/hft';
 import { fmt6, fmtSigned6, fmtSignedUsd6, fmtUsd6 } from '../utils/format';
+import { SegmentDefs, SevenSegmentNumber, useConsoleGlyphHeight } from './SevenSegmentNumber';
 
 interface EquityBezelProps {
   snapshot: DashboardSnapshot | null;
@@ -25,8 +26,11 @@ export const EquityBezel: React.FC<EquityBezelProps> = ({ snapshot }) => {
 
   const marginPaused = snapshot?.scannerState === 'PAUSED_MARGIN_FULL';
 
+  const glyphPx = useConsoleGlyphHeight();
+
   return (
     <section className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+      <SegmentDefs />
       {/* 1. START BALANCE (Fixed on 1st Binance API Connection until Reset) */}
       <div className="skeuo-chassis relative rounded-2xl p-4 sm:p-5 lg:col-span-5">
         <div className="skeuo-screw !absolute top-2.5 left-2.5" />
@@ -53,9 +57,12 @@ export const EquityBezel: React.FC<EquityBezelProps> = ({ snapshot }) => {
 
         <div className="skeuo-oled rounded-xl px-4 py-4">
           <div className="flex items-baseline justify-between gap-2">
-            <div className="font-mono-num text-2xl font-bold tracking-tight text-[#fdf6f5] sm:text-3xl">
-              {fmtUsd6(startBalance)}
-            </div>
+            <SevenSegmentNumber
+              value={fmtUsd6(startBalance)}
+              tone="orchid"
+              heightPx={glyphPx}
+              label={`Start balance ${fmtUsd6(startBalance)} USDT`}
+            />
             <span className="font-mono-num text-xs font-semibold text-[#EBAEE6]">USDT</span>
           </div>
           <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-[#EBAEE6]/10 pt-2 text-[11px] text-[#c7a8a5]">
@@ -106,14 +113,14 @@ export const EquityBezel: React.FC<EquityBezelProps> = ({ snapshot }) => {
         <div className="skeuo-oled rounded-xl px-4 py-4">
           <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-baseline">
             <div className="flex items-baseline gap-2.5">
-              <motion.span
-                key={fmt6(currentEquity)}
-                initial={{ opacity: 0.85 }}
-                animate={{ opacity: 1 }}
-                className="font-mono-num text-2xl font-bold tracking-tight text-white sm:text-3xl"
-              >
-                {fmtUsd6(currentEquity)}
-              </motion.span>
+              <SevenSegmentNumber
+                value={fmtUsd6(currentEquity)}
+                tone={startLocked && equityDelta < 0 ? 'coral' : 'mint'}
+                heightPx={glyphPx}
+                label={`Current equity ${fmtUsd6(currentEquity)} USDT, ${
+                  equityDelta >= 0 ? 'ahead of' : 'behind'
+                } start balance`}
+              />
               <span className="font-mono-num text-xs font-semibold text-[#ADEBB3]">
                 USDT LIVE
               </span>

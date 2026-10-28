@@ -5,6 +5,8 @@ import fs from 'node:fs';
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import { HftBotEngine } from './engine/hftBotEngine.js';
+import { DIRECTIVE_KINDS } from './ai/operatorDirectives.js';
+import type { OperatorDirectiveKind } from './types.js';
 import { logger } from './utils/logger.js';
 
 const HOST = process.env.HOST || '0.0.0.0';
@@ -88,6 +90,68 @@ async function startServer() {
   app.post('/api/settings/style-params', (req, res) => {
     engine.updateStyleParams(req.body || {});
     res.json({ snapshot: engine.getSnapshot() });
+  });
+
+  const NUMERIC_DIRECTIVES = new Set<OperatorDirectiveKind>([
+    'MAX_CONCURRENT_POSITIONS',
+    'RSI_GATE',
+    'MIN_24H_MOVE',
+    'MAX_24H_OVEREXTENSION',
+  ]);
+
+  app.post('/api/settings/directives', (req, res) => {
+    const kind = req.body?.kind as OperatorDirectiveKind;
+    if (!DIRECTIVE_KINDS.includes(kind)) {
+      res.status(400).json({ ok: false, message: `Unknown directive kind: ${String(kind)}` });
+      return;
+    }
+    const symbolRaw = typeof req.body?.symbol === 'string' ? req.body.symbol.trim() : '';
+    if (kind === 'STAND_DOWN_SYMBOL' && !/^[A-Z0-9]{5,20}USDT$/i.test(symbolRaw)) {
+      res.status(400).json({ ok: false, message: 'A symbol stand-down needs a valid USDT symbol.' });
+      return;
+    }
+    const value = typeof req.body?.value === 'number' ? req.body.value : Number(req.body?.value);
+    if (NUMERIC_DIRECTIVES.has(kind) && !Number.isFinite(value)) {
+      res.status(400).json({ ok: false, message: `${kind} needs a numeric threshold.` });
+      return;
+    }
+    const directive = engine.addOperatorDirective({
+      kind,
+      symbol: symbolRaw || undefined,
+      value: NUMERIC_DIRECTIVES.has(kind) ? value : undefined,
+      reason: typeof req.body?.reason === 'string' ? req.body.reason : '',
+    });
+    res.json({ ok: true, directive, snapshot: engine.getSnapshot() });
+  });
+
+  app.post('/api/settings/directives/toggle', (req, res) => {
+    const id = String(req.body?.id || '');
+    const active = Boolean(req.body?.active);
+    const ok = engine.setOperatorDirectiveActive(id, active);
+    if (!ok) {
+      res.status(404).json({ ok: false, message: 'Directive not found.' });
+      return;
+    }
+    res.json({ ok, snapshot: engine.getSnapshot() });
+  });
+
+  app.post('/api/settings/notes', (req, res) => {
+    const text = typeof req.body?.text === 'string' ? req.body.text : '';
+    const note = engine.addOperatorNote(text);
+    if (!note) {
+      res.status(400).json({ ok: false, message: 'Briefing text is empty.' });
+      return;
+    }
+    res.json({ ok: true, note, snapshot: engine.getSnapshot() });
+  });
+
+  app.post('/api/settings/notes/remove', (req, res) => {
+    const ok = engine.removeOperatorNote(String(req.body?.id || ''));
+    if (!ok) {
+      res.status(404).json({ ok: false, message: 'Briefing not found.' });
+      return;
+    }
+    res.json({ ok, snapshot: engine.getSnapshot() });
   });
 
   app.post('/api/positions/close', async (req, res) => {

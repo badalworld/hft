@@ -5,6 +5,7 @@ import {
   Cpu,
   GitBranch,
   Library,
+  Megaphone,
   Sparkles,
   TrendingUp,
   X,
@@ -14,9 +15,51 @@ import type {
   DashboardSnapshot,
   LocalDecisionConfig,
   LocalDecisionProvider,
+  OperatorDirectiveKind,
 } from '../types/hft';
+import {
+  DIRECTIVE_KINDS,
+  DIRECTIVE_LABEL,
+  describeDirective,
+} from '../../server/ai/operatorDirectives';
 import { fmt6, fmtSigned6, fmtSignedUsd6 } from '../utils/format';
 import { LotusSelect } from './LotusSelect';
+
+/** Which field each standing order needs before it can be bound. */
+const DIRECTIVE_NEEDS: Record<OperatorDirectiveKind, 'symbol' | 'value' | 'nothing'> = {
+  STAND_DOWN_ALL: 'nothing',
+  STAND_DOWN_SYMBOL: 'symbol',
+  BLOCK_LONG: 'nothing',
+  BLOCK_SHORT: 'nothing',
+  MAX_CONCURRENT_POSITIONS: 'value',
+  RSI_GATE: 'value',
+  MIN_24H_MOVE: 'value',
+  MAX_24H_OVEREXTENSION: 'value',
+};
+
+const VALUE_HINT: Partial<Record<OperatorDirectiveKind, { label: string; example: string; hint: string }>> =
+  {
+    MAX_CONCURRENT_POSITIONS: {
+      label: 'Max open positions',
+      example: 'e.g. 3',
+      hint: 'A new entry is refused while this many slots are already held.',
+    },
+    RSI_GATE: {
+      label: 'RSI 15s limit',
+      example: 'e.g. 38',
+      hint: 'LONG needs RSI at or below this, SHORT at or above — below the line the dip has reset, above it the same signal is a chase.',
+    },
+    MIN_24H_MOVE: {
+      label: 'Min 24h move %',
+      example: 'e.g. 2.5',
+      hint: 'Flat names cannot pay a 15x round trip in fees; refuse anything that has not actually moved.',
+    },
+    MAX_24H_OVEREXTENSION: {
+      label: 'Max 24h move %',
+      example: 'e.g. 45',
+      hint: 'Past this the move is spent and the exit liquidity is gone — the next entrant is the exit.',
+    },
+  };
 
 const CouncilBallots: React.FC<{ ballots: AiCouncilBallot[] }> = ({ ballots }) => (
   <div className="mt-2 space-y-1.5">
@@ -59,11 +102,26 @@ const CouncilBallots: React.FC<{ ballots: AiCouncilBallot[] }> = ({ ballots }) =
   </div>
 );
 
+/** Every directive/note route answers with the same envelope. */
+interface BriefingResult {
+  ok?: boolean;
+  message?: string;
+}
+
 interface AiAgentClubModalProps {
   open: boolean;
   snapshot: DashboardSnapshot | null;
   onClose: () => void;
   onUpdateLocalAi: (cfg: Partial<LocalDecisionConfig>) => Promise<void>;
+  onAddDirective: (d: {
+    kind: OperatorDirectiveKind;
+    symbol?: string;
+    value?: number;
+    reason?: string;
+  }) => Promise<BriefingResult>;
+  onToggleDirective: (id: string, active: boolean) => Promise<BriefingResult>;
+  onAddNote: (text: string) => Promise<BriefingResult>;
+  onRemoveNote: (id: string) => Promise<BriefingResult>;
 }
 
 export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
@@ -71,6 +129,10 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
   snapshot,
   onClose,
   onUpdateLocalAi,
+  onAddDirective,
+  onToggleDirective,
+  onAddNote,
+  onRemoveNote,
 }) => {
   const [provider, setProvider] = useState<LocalDecisionProvider>(
     snapshot?.localDecisionConfig.provider || 'builtin'
@@ -82,6 +144,14 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
     snapshot?.localDecisionConfig.modelName || 'nimble'
   );
 
+  const [ruleKind, setRuleKind] = useState<OperatorDirectiveKind>('MAX_24H_OVEREXTENSION');
+  const [ruleSymbol, setRuleSymbol] = useState('');
+  const [ruleValue, setRuleValue] = useState('');
+  const [ruleReason, setRuleReason] = useState('');
+  const [noteText, setNoteText] = useState('');
+  const [briefingError, setBriefingError] = useState('');
+  const [briefingBusy, setBriefingBusy] = useState(false);
+
   if (!open) return null;
 
   const agents = snapshot?.agents ?? [];
@@ -89,10 +159,63 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
   const weights = snapshot?.system1Weights;
   const mutations = snapshot?.styleMutations ?? [];
   const closedTrades = snapshot?.recentClosedTrades ?? [];
+  const directives = snapshot?.operatorDirectives ?? [];
+  const notes = snapshot?.operatorNotes ?? [];
+  const activeRuleCount = directives.filter((d) => d.active).length;
+  const hasRuleField = DIRECTIVE_NEEDS[ruleKind] !== 'nothing';
 
   const handleSaveRuntime = async (e: React.FormEvent) => {
     e.preventDefault();
     await onUpdateLocalAi({ provider, endpointUrl, modelName });
+  };
+
+  const handleAddRule = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBriefingError('');
+    const needs = DIRECTIVE_NEEDS[ruleKind];
+    const symbol = ruleSymbol.trim().toUpperCase();
+    const value = Number(ruleValue);
+    if (needs === 'symbol' && !/^[A-Z0-9]{5,20}USDT$/.test(symbol)) {
+      setBriefingError('Enter a full USDT pair, e.g. DOGEUSDT.');
+      return;
+    }
+    if (needs === 'value' && (ruleValue.trim() === '' || !Number.isFinite(value))) {
+      setBriefingError('This rule needs a numeric threshold.');
+      return;
+    }
+    setBriefingBusy(true);
+    const res = await onAddDirective({
+      kind: ruleKind,
+      symbol: needs === 'symbol' ? symbol : undefined,
+      value: needs === 'value' ? value : undefined,
+      reason: ruleReason.trim() || undefined,
+    });
+    setBriefingBusy(false);
+    if (res?.ok !== true) {
+      setBriefingError(res?.message || 'Could not bind that rule.');
+      return;
+    }
+    setRuleSymbol('');
+    setRuleValue('');
+    setRuleReason('');
+  };
+
+  const handleAddNote = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBriefingError('');
+    const text = noteText.trim();
+    if (text.length < 4) {
+      setBriefingError('Write a sentence the agents can act on.');
+      return;
+    }
+    setBriefingBusy(true);
+    const res = await onAddNote(text);
+    setBriefingBusy(false);
+    if (res?.ok !== true) {
+      setBriefingError(res?.message || 'Could not save that briefing.');
+      return;
+    }
+    setNoteText('');
   };
 
   return (
@@ -302,6 +425,43 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
                     <div className="mt-0.5 text-[11px] text-[#FF857A]">
                       <strong>Improvement:</strong> {t.postMortem.whatWeMissed}
                     </div>
+
+                    {t.postMortem.autopsy && (
+                      <div className="mt-2 rounded-lg border border-[#FF857A]/35 bg-[#FF857A]/[0.07] p-2.5">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="rounded border border-[#FF857A]/50 bg-[#FF857A]/20 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-[#FF857A]">
+                            Loss autopsy — {t.postMortem.autopsy.rootCauseLabel}
+                          </span>
+                          <span className="font-mono-num text-[10px] text-[#b99895]">
+                            {t.postMortem.autopsy.rootCause}
+                          </span>
+                        </div>
+                        <p className="mt-1.5 text-[11px] leading-relaxed text-[#f4e5e3]">
+                          {t.postMortem.autopsy.whyItHappened}
+                        </p>
+                        <p className="mt-1.5 text-[11px] leading-relaxed text-[#ADEBB3]">
+                          <strong>Rule now carried:</strong>{' '}
+                          {t.postMortem.autopsy.avoidanceRule}
+                        </p>
+                        <p className="mt-1 text-[11px] leading-relaxed text-[#EBAEE6]">
+                          <strong>Execution update:</strong>{' '}
+                          {t.postMortem.autopsy.executionUpdate}
+                        </p>
+                        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 border-t border-[#FF857A]/20 pt-1.5 font-mono-num text-[10px] text-[#b99895]">
+                          <span>fee hurdle {fmt6(t.postMortem.autopsy.evidence.feeHurdleRoiPct)}% ROI</span>
+                          <span>MFE {fmt6(t.postMortem.autopsy.evidence.peakRoiPct)}%</span>
+                          <span>MAE {fmt6(t.postMortem.autopsy.evidence.worstRoiPct)}%</span>
+                          <span>move {fmt6(t.postMortem.autopsy.evidence.underlyingMovePct)}%</span>
+                          <span>held {fmt6(t.postMortem.autopsy.evidence.durationSec)}s</span>
+                        </div>
+                        {t.postMortem.autopsy.contributingCauses.length > 0 && (
+                          <div className="mt-1 text-[10px] text-[#a58784]">
+                            Also present: {t.postMortem.autopsy.contributingCauses.join(', ')}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     {t.postMortem.styleAdjustments.length > 0 && (
                       <div className="mt-1.5 flex flex-wrap gap-1.5">
                         {t.postMortem.styleAdjustments.map((adj, idx) => (
@@ -404,6 +564,236 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
                 ))}
               </div>
             )}
+          </div>
+
+          {/* 3c. OPERATOR BRIEFING — the human's direct channel into the club */}
+          <div className="skeuo-plate skeuo-lotus-trim rounded-xl p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <div className="skeuo-oled flex h-7 w-7 items-center justify-center rounded-lg border border-[#EBAEE6]/40">
+                  <Megaphone className="h-3.5 w-3.5 text-[#EBAEE6]" />
+                </div>
+                <h3 className="text-xs font-bold uppercase tracking-[0.14em] text-white">
+                  Operator Briefing — Direct Channel to the Club
+                </h3>
+              </div>
+              <span className="font-mono-num text-[10px] text-[#EBAEE6]">
+                {activeRuleCount} binding rule{activeRuleCount === 1 ? '' : 's'} • {notes.length}{' '}
+                briefing{notes.length === 1 ? '' : 's'}
+              </span>
+            </div>
+
+            <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div className="skeuo-oled rounded-lg border-l-2 border-l-[#ADEBB3] px-2.5 py-2 text-[10px] leading-relaxed text-[#c7a8a5]">
+                <span className="font-mono-num font-bold uppercase tracking-wider text-[#ADEBB3]">
+                  Binding
+                </span>{' '}
+                — the club can approve an entry, but it cannot outvote a standing order. The veto is
+                logged and counted per rule.
+              </div>
+              <div className="skeuo-oled rounded-lg border-l-2 border-l-[#EBAEE6] px-2.5 py-2 text-[10px] leading-relaxed text-[#c7a8a5]">
+                <span className="font-mono-num font-bold uppercase tracking-wider text-[#EBAEE6]">
+                  Advisory
+                </span>{' '}
+                — your read on the tape, quoted into Alpha Scout and Leverage Architect before they
+                vote. Never gates an order.
+              </div>
+            </div>
+
+            {/* Standing orders in force */}
+            {directives.length === 0 ? (
+              <div className="skeuo-oled mb-3 rounded-xl px-3 py-3 text-center text-[11px] text-[#d5b8b5]">
+                No standing orders. Bind one below — it applies to the very next 15s candle.
+              </div>
+            ) : (
+              <div className="mb-3 max-h-48 space-y-1.5 overflow-y-auto pr-1">
+                {directives.map((d) => (
+                  <div
+                    key={d.id}
+                    className="skeuo-oled flex flex-wrap items-start justify-between gap-2 rounded-lg px-2.5 py-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span
+                          className={`h-2 w-2 shrink-0 rounded-full ${
+                            d.active ? 'led-mint' : 'led-off'
+                          }`}
+                        />
+                        <span className="font-mono-num text-[10px] font-bold text-[#fdf6f5]">
+                          {describeDirective(d)}
+                        </span>
+                        {d.appliedCount > 0 && (
+                          <span className="rounded border border-[#D9A441]/45 bg-[#D9A441]/15 px-1.5 py-0.5 font-mono-num text-[9px] text-[#D9A441]">
+                            blocked {d.appliedCount} entr{d.appliedCount === 1 ? 'y' : 'ies'}
+                          </span>
+                        )}
+                      </div>
+                      {d.reason && (
+                        <p className="mt-0.5 text-[10px] italic leading-snug text-[#c7a8a5]">
+                          “{d.reason}”
+                        </p>
+                      )}
+                      <p className="mt-0.5 font-mono-num text-[9px] text-[#a58784]">
+                        {d.active ? 'in force' : 'lifted'}
+                        {d.lastAppliedAt
+                          ? ` • last veto ${new Date(d.lastAppliedAt).toLocaleString([], {
+                              month: 'short',
+                              day: 'numeric',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}`
+                          : ''}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onToggleDirective(d.id, !d.active)}
+                      className={`skeuo-btn shrink-0 rounded-lg px-2.5 py-1 font-mono-num text-[10px] ${
+                        d.active ? 'text-[#FF857A]' : 'text-[#ADEBB3]'
+                      }`}
+                    >
+                      {d.active ? 'Lift' : 'Re-activate'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <form onSubmit={handleAddRule} className="grid grid-cols-1 gap-2.5 sm:grid-cols-12">
+              <div className={hasRuleField ? 'sm:col-span-4' : 'sm:col-span-5'}>
+                <label className="mb-1 block text-[10px] uppercase tracking-wider text-[#e7cecc]">
+                  Standing order
+                </label>
+                <LotusSelect
+                  value={ruleKind}
+                  onChange={(next) => setRuleKind(next as OperatorDirectiveKind)}
+                  ariaLabel="Standing order type"
+                  className="w-full"
+                  options={DIRECTIVE_KINDS.map((k) => ({
+                    value: k,
+                    label: DIRECTIVE_LABEL[k],
+                    badge:
+                      DIRECTIVE_NEEDS[k] === 'symbol'
+                        ? 'SYMBOL'
+                        : DIRECTIVE_NEEDS[k] === 'value'
+                        ? 'THRESHOLD'
+                        : 'INSTANT',
+                  }))}
+                />
+              </div>
+
+              {DIRECTIVE_NEEDS[ruleKind] === 'symbol' && (
+                <div className="sm:col-span-3">
+                  <label className="mb-1 block text-[10px] uppercase tracking-wider text-[#e7cecc]">
+                    Symbol
+                  </label>
+                  <input
+                    type="text"
+                    value={ruleSymbol}
+                    onChange={(e) => setRuleSymbol(e.target.value.toUpperCase())}
+                    placeholder="DOGEUSDT"
+                    className="skeuo-input w-full rounded-xl px-3 py-2 font-mono-num text-xs"
+                  />
+                </div>
+              )}
+
+              {DIRECTIVE_NEEDS[ruleKind] === 'value' && (
+                <div className="sm:col-span-3">
+                  <label className="mb-1 block truncate text-[10px] uppercase tracking-wider text-[#e7cecc]">
+                    {VALUE_HINT[ruleKind]?.label ?? 'Threshold'}
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={ruleValue}
+                    onChange={(e) => setRuleValue(e.target.value)}
+                    placeholder={VALUE_HINT[ruleKind]?.example}
+                    className="skeuo-input w-full rounded-xl px-3 py-2 font-mono-num text-xs"
+                  />
+                </div>
+              )}
+
+              <div className={hasRuleField ? 'sm:col-span-3' : 'sm:col-span-4'}>
+                <label className="mb-1 block text-[10px] uppercase tracking-wider text-[#e7cecc]">
+                  Why (quoted in every veto)
+                </label>
+                <input
+                  type="text"
+                  value={ruleReason}
+                  onChange={(e) => setRuleReason(e.target.value)}
+                  placeholder="e.g. this name prints headlines, not setups"
+                  className="skeuo-input w-full rounded-xl px-3 py-2 text-xs"
+                />
+              </div>
+
+              <div className={hasRuleField ? 'sm:col-span-2' : 'sm:col-span-3'}>
+                <button
+                  type="submit"
+                  disabled={briefingBusy}
+                  className="skeuo-btn w-full rounded-xl px-3 py-2 font-mono-num text-[11px] font-bold text-[#ADEBB3] disabled:opacity-50"
+                >
+                  Bind rule
+                </button>
+              </div>
+            </form>
+
+            {DIRECTIVE_NEEDS[ruleKind] === 'value' && VALUE_HINT[ruleKind]?.hint && (
+              <p className="mt-1.5 text-[10px] text-[#a58784]">{VALUE_HINT[ruleKind]?.hint}</p>
+            )}
+
+            {/* Advisory briefings */}
+            <div className="mt-4 border-t border-[#EBAEE6]/15 pt-3">
+              <h4 className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[#EBAEE6]">
+                Market Read for the Agents
+              </h4>
+              {notes.length > 0 && (
+                <div className="mb-2 max-h-40 space-y-1.5 overflow-y-auto pr-1">
+                  {notes.map((n) => (
+                    <div
+                      key={n.id}
+                      className="skeuo-oled flex items-start justify-between gap-2 rounded-lg px-2.5 py-2"
+                    >
+                      <p className="min-w-0 flex-1 text-[11px] leading-snug text-[#f4e4e2]">
+                        {n.text}
+                      </p>
+                      <span className="shrink-0 font-mono-num text-[9px] text-[#a58784]">
+                        {new Date(n.createdAt).toLocaleDateString([], {
+                          month: 'short',
+                          day: 'numeric',
+                        })}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onRemoveNote(n.id)}
+                        aria-label="Remove briefing"
+                        className="shrink-0 rounded p-0.5 text-[#a58784] hover:text-[#FF857A]"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <form onSubmit={handleAddNote} className="flex flex-col gap-2 sm:flex-row">
+                <textarea
+                  value={noteText}
+                  onChange={(e) => setNoteText(e.target.value)}
+                  rows={2}
+                  placeholder="e.g. BTC is bleeding into the US cash open — treat long pullbacks as counter-trend and size half"
+                  className="skeuo-input min-w-0 flex-1 rounded-xl px-3 py-2 text-xs leading-snug"
+                />
+                <button
+                  type="submit"
+                  disabled={briefingBusy}
+                  className="skeuo-btn shrink-0 rounded-xl px-3 py-2 font-mono-num text-[11px] font-bold text-[#EBAEE6] disabled:opacity-50"
+                >
+                  Brief the club
+                </button>
+              </form>
+              {briefingError && (
+                <p className="mt-1.5 font-mono-num text-[10px] text-[#FF857A]">{briefingError}</p>
+              )}
+            </div>
           </div>
 
           {/* 4. ZERO-FEE SYSTEM-1 DECISION ENGINE CONNECTOR (NIMBLE / LAYA / KEV) */}

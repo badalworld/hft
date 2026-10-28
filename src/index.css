@@ -272,6 +272,40 @@ select optgroup {
   box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.88);
 }
 
+/* Live position diodes. Fading the element dims its halo too, which is what a
+   real lamp does as the current drops. Losing trades pulse faster — the alarm
+   state should be readable from across the room without looking at the number. */
+@keyframes led-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.22;
+  }
+}
+
+.led-blink {
+  animation: led-pulse 1.5s ease-in-out infinite;
+}
+
+.led-blink-alarm {
+  animation: led-pulse 0.8s ease-in-out infinite;
+}
+
+/* Orchid collar: the trailing stop has armed and will protect the position. */
+.led-armed-ring {
+  outline: 1px solid rgba(235, 174, 230, 0.85);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .led-blink,
+  .led-blink-alarm {
+    animation: none;
+  }
+}
+
 /* Rose-Bronze Machined Corner Screw Rivet */
 .skeuo-screw {
   width: 9px;

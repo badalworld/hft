@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { ClosedTradeRecord } from '../server/types.js';
+import type {
+  ClosedTradeRecord,
+  OperatorDirective,
+  OperatorDirectiveKind,
+} from '../server/types.js';
 import type { BinanceFuturesRestClient } from '../server/binance/restClient.js';
 import type { BinanceWsStreamManager } from '../server/binance/wsStreamManager.js';
 import { CandleBuilder15s } from '../server/binance/candleBuilder15s.js';
@@ -11,6 +15,7 @@ import {
   AiAgentClubOrchestrator,
   createDefaultStyleParams,
 } from '../server/ai/agentClubGraph.js';
+import { describeDirective, findVetoingDirective } from '../server/ai/operatorDirectives.js';
 import { buildTradeLesson } from '../server/ai/lessonMemory.js';
 import { createDefaultSystem1Weights } from '../server/ai/system1Primitives.js';
 import { MarketScanner40 } from '../server/engine/marketScanner.js';
@@ -116,6 +121,10 @@ async function runSelfTests() {
       netPnl: -0.22,
       grossPnl: -0.20,
       binanceFees: 0.02,
+      initialMargin: 2.0,
+      leverage: 10,
+      entryPrice: 10.0,
+      exitPrice: 9.98,
       finalRoiPct: -10.0,
       peakRoiPct: 0.8,
       worstRoiPct: -10.2,
@@ -124,8 +133,23 @@ async function runSelfTests() {
       features: { ...stratEval.features, aiConfidence: entryDecision.confidence },
     });
     assert.equal(pmLoss.analysis.verdict, 'LOSS_PREMATURE_PULLBACK');
+    assert.equal(pmLoss.analysis.autopsy?.rootCause, 'ENTRY_TOO_EARLY');
+    assert.ok(pmLoss.analysis.autopsy?.avoidanceRule.includes('15s'));
     assert.ok(club.getStyleParams().minOrderflowDeltaRatio > beforeDeltaMin);
     assert.equal(club.getSystem1Weights().totalUpdates, 1);
+
+    // The autopsy rule has to be recallable by the next trade in the same setup band,
+    // otherwise the post-mortem is a report and not a change in behaviour.
+    const recallAfterLoss = await club.evaluateEntryCandidate({
+      symbol: 'TESTUSDT2',
+      side: 'LONG',
+      features: stratEval.features,
+      minNotional: 5,
+    });
+    assert.ok(
+      recallAfterLoss.lessonGuidance.includes('STANDING RULE'),
+      'expected the loss autopsy rule to be recalled on the next entry in the band'
+    );
 
     console.log('5. Verifying 1-Second Position Monitor, Fees, Net PNL & >=5% ROI Trailing Stop...');
     const monitor = new PositionMonitor1s(store);
@@ -356,6 +380,118 @@ async function runSelfTests() {
     assert.equal(f6(ledger.points[3].cumulativeNet), '0.170000');
     assert.equal(f6(ledger.points[2].cumulativeSideNet), '0.200000');
     assert.equal(ledger.points[0].symbol, 'AUSDT', 'points must be oldest-close first');
+
+    console.log('8. Verifying operator standing orders veto entries while briefings stay advisory...');
+    const candidateFor = (
+      symbol: string,
+      side: 'LONG' | 'SHORT',
+      openPositionCount: number
+    ) => ({ symbol, side, features: stratEval.features, openPositionCount });
+
+    const rsiGate = store.addOperatorDirective({
+      kind: 'RSI_GATE',
+      value: stratEval.features.rsi15s - 0.5,
+      reason: 'dip has not reset',
+    });
+    assert.equal(rsiGate.active, true);
+    assert.equal(rsiGate.appliedCount, 0);
+    assert.ok(describeDirective(rsiGate).includes('LONG needs RSI <='));
+
+    // The club approved this exact setup in step 4; a standing order still stops it.
+    const vetoed = findVetoingDirective(store.getOperatorDirectives(), candidateFor('TESTUSDT', 'LONG', 0));
+    assert.equal(vetoed?.id, rsiGate.id, 'RSI gate did not veto an otherwise-approved LONG');
+    store.recordDirectiveApplied(rsiGate.id);
+    assert.equal(store.getOperatorDirectives()[0].appliedCount, 1);
+    assert.ok(store.getOperatorDirectives()[0].lastAppliedAt);
+
+    // SHORT is on the far side of the same gate, so the gate leaves it alone.
+    assert.equal(
+      findVetoingDirective(store.getOperatorDirectives(), candidateFor('TESTUSDT', 'SHORT', 0)),
+      null
+    );
+
+    // A lifted rule must be invisible to the entry path, not merely grey in the UI.
+    assert.equal(store.setOperatorDirectiveActive(rsiGate.id, false), true);
+    assert.equal(
+      findVetoingDirective(store.getOperatorDirectives(), candidateFor('TESTUSDT', 'LONG', 0)),
+      null
+    );
+
+    const raw = (
+      kind: OperatorDirectiveKind,
+      extra: Partial<{ symbol: string; value: number; active: boolean }> = {}
+    ): OperatorDirective => ({
+      id: kind,
+      createdAt: 0,
+      kind,
+      reason: '',
+      active: true,
+      appliedCount: 0,
+      lastAppliedAt: null,
+      ...extra,
+    });
+
+    const standDown = store.addOperatorDirective({ kind: 'STAND_DOWN_SYMBOL', symbol: 'testusdt' });
+    // Symbol is normalised on the way in, and only that name is affected.
+    assert.equal(standDown.symbol, 'TESTUSDT');
+    assert.equal(findVetoingDirective([standDown], candidateFor('DOGEUSDT', 'LONG', 0)), null);
+    assert.equal(findVetoingDirective([standDown], candidateFor('TESTUSDT', 'SHORT', 0))?.id, standDown.id);
+
+    assert.equal(
+      findVetoingDirective([raw('MAX_24H_OVEREXTENSION', { value: 12 })], candidateFor('XUSDT', 'LONG', 0))
+        ?.kind,
+      'MAX_24H_OVEREXTENSION',
+      'a 18.5% 24h move slipped past the overextension cap'
+    );
+    assert.equal(
+      findVetoingDirective([raw('MIN_24H_MOVE', { value: 25 })], candidateFor('XUSDT', 'LONG', 0))?.kind,
+      'MIN_24H_MOVE',
+      'a move too flat to clear fees was allowed'
+    );
+    assert.equal(
+      findVetoingDirective(
+        [raw('MAX_CONCURRENT_POSITIONS', { value: 2 })],
+        candidateFor('XUSDT', 'LONG', 2)
+      )?.kind,
+      'MAX_CONCURRENT_POSITIONS'
+    );
+    assert.equal(
+      findVetoingDirective(
+        [raw('MAX_CONCURRENT_POSITIONS', { value: 2 })],
+        candidateFor('XUSDT', 'LONG', 1)
+      ),
+      null
+    );
+    assert.equal(
+      findVetoingDirective([raw('STAND_DOWN_ALL')], candidateFor('XUSDT', 'SHORT', 5))?.kind,
+      'STAND_DOWN_ALL'
+    );
+    assert.equal(findVetoingDirective([raw('BLOCK_LONG')], candidateFor('XUSDT', 'SHORT', 0)), null);
+    // First active match wins, and a lifted rule in front of it must be skipped.
+    assert.equal(
+      findVetoingDirective(
+        [raw('BLOCK_LONG', { active: false }), raw('STAND_DOWN_ALL')],
+        candidateFor('XUSDT', 'LONG', 0)
+      )?.kind,
+      'STAND_DOWN_ALL'
+    );
+
+    // Briefings are read by the agents but must not change the gate outcome.
+    const note = store.addOperatorNote('BTC is bleeding into the US cash open — half size longs.');
+    club.setOperatorNotes(store.getOperatorNotes());
+    const briefedDecision = await club.evaluateEntryCandidate({
+      symbol: 'TESTUSDT',
+      side: 'LONG',
+      features: stratEval.features,
+      minNotional: 5,
+    });
+    assert.equal(briefedDecision.approved, true, 'a briefing vetoed an entry it should only inform');
+    assert.ok(
+      briefedDecision.reason.includes('OPERATOR BRIEFING'),
+      `briefing was not quoted into the agents: ${briefedDecision.reason}`
+    );
+    assert.equal(store.removeOperatorNote(note.id), true);
+    assert.equal(store.getOperatorNotes().length, 0);
 
     console.log('✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!');
   } finally {
