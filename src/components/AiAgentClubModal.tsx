@@ -14,6 +14,7 @@ import type {
   LocalDecisionProvider,
 } from '../types/hft';
 import { fmt6, fmtSigned6, fmtSignedUsd6 } from '../utils/format';
+import { LotusSelect } from './LotusSelect';
 
 interface AiAgentClubModalProps {
   open: boolean;
@@ -295,16 +296,34 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
                 <label className="mb-1 block text-[10px] uppercase tracking-wider text-[#e7cecc]">
                   Decision Engine Mode
                 </label>
-                <select
+                <LotusSelect
                   value={provider}
-                  onChange={(e) => setProvider(e.target.value as LocalDecisionProvider)}
-                  className="skeuo-input w-full rounded-xl px-3 py-2 text-xs"
-                >
-                  <option value="builtin">Built-in Quant System-1 RLCD (0.2ms, $0)</option>
-                  <option value="ollama_nimble">Local Ollama (Bespoke-Nimble / Hermes3)</option>
-                  <option value="laya_http">Local Laya HTTP Server (laya[serve])</option>
-                  <option value="kev_http">Local Kev System-One Server (kev-0.8b/4b)</option>
-                </select>
+                  onChange={(next) => setProvider(next as LocalDecisionProvider)}
+                  ariaLabel="Decision Engine Mode"
+                  className="w-full"
+                  options={[
+                    {
+                      value: 'builtin',
+                      label: 'Built-in Quant System-1 RLCD',
+                      badge: '0.2ms • $0',
+                    },
+                    {
+                      value: 'ollama_nimble',
+                      label: 'Local Ollama (Bespoke-Nimble / Hermes3)',
+                      badge: 'FREE',
+                    },
+                    {
+                      value: 'laya_http',
+                      label: 'Local Laya HTTP Server (laya[serve])',
+                      badge: 'FREE',
+                    },
+                    {
+                      value: 'kev_http',
+                      label: 'Local Kev System-One Server (kev-0.8b/4b)',
+                      badge: 'FREE',
+                    },
+                  ]}
+                />
               </div>
 
               <div>

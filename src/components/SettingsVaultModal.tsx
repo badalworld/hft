@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import type { DashboardSnapshot } from '../types/hft';
 import { fmtUsd6 } from '../utils/format';
+import { LotusSelect } from './LotusSelect';
 
 interface SettingsVaultModalProps {
   open: boolean;
@@ -233,18 +234,25 @@ export const SettingsVaultModal: React.FC<SettingsVaultModalProps> = ({
                 {interfaces.length > 1 && (
                   <div className="flex items-center gap-2 text-[11px]">
                     <span className="text-[#c7a8a5]">Outbound Socket Route:</span>
-                    <select
+                    <LotusSelect
+                      size="sm"
                       value={ipReport?.boundLocalAddress || ''}
-                      onChange={(e) => onBindLocalIp(e.target.value || null)}
-                      className="skeuo-input rounded-lg px-2 py-1 font-mono-num text-[11px]"
-                    >
-                      <option value="">OS Automatic Primary IPv4</option>
-                      {interfaces.map((nic) => (
-                        <option key={`${nic.interfaceName}-${nic.localIpv4}`} value={nic.localIpv4}>
-                          Pin to {nic.interfaceName} ({nic.localIpv4})
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(val) => onBindLocalIp(val || null)}
+                      ariaLabel="Outbound Socket Route"
+                      className="min-w-[225px] font-mono-num"
+                      options={[
+                        {
+                          value: '',
+                          label: 'OS Automatic Primary IPv4',
+                          badge: 'AUTO',
+                        },
+                        ...interfaces.map((nic) => ({
+                          value: nic.localIpv4,
+                          label: `Pin to ${nic.interfaceName} (${nic.localIpv4})`,
+                          badge: nic.isPrimaryRoute ? 'PRI' : 'NIC',
+                        })),
+                      ]}
+                    />
                   </div>
                 )}
               </div>

@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Download, ScrollText, Search, Trash2, X } from 'lucide-react';
 import type { LogEntry, LogLevel } from '../types/hft';
+import { LotusSelect } from './LotusSelect';
 
 interface SystemLogsDrawerProps {
   open: boolean;
@@ -113,35 +114,39 @@ export const SystemLogsDrawer: React.FC<SystemLogsDrawerProps> = ({
             />
           </div>
 
-          <select
+          <LotusSelect
             value={levelFilter}
-            onChange={(e) => setLevelFilter(e.target.value)}
-            className="skeuo-input rounded-xl px-3 py-2 text-xs"
-          >
-            <option value="ALL">All Levels</option>
-            <option value="EXEC">EXEC (Orders & Ladder)</option>
-            <option value="ERROR">ERROR (Failures)</option>
-            <option value="WARN">WARN</option>
-            <option value="SUCCESS">SUCCESS</option>
-            <option value="AI">AI_CLUB</option>
-            <option value="INFO">INFO</option>
-          </select>
+            onChange={(val) => setLevelFilter(val)}
+            ariaLabel="Filter Log Level"
+            className="min-w-[195px]"
+            options={[
+              { value: 'ALL', label: 'All Levels', badge: 'ALL' },
+              { value: 'EXEC', label: 'EXEC (Orders & Ladder)', badge: 'HFT' },
+              { value: 'ERROR', label: 'ERROR (Failures)', badge: 'ERR' },
+              { value: 'WARN', label: 'WARN', badge: 'WRN' },
+              { value: 'SUCCESS', label: 'SUCCESS', badge: 'OK' },
+              { value: 'AI', label: 'AI_CLUB', badge: 'RLCD' },
+              { value: 'INFO', label: 'INFO' },
+            ]}
+          />
 
-          <select
+          <LotusSelect
             value={moduleFilter}
-            onChange={(e) => setModuleFilter(e.target.value)}
-            className="skeuo-input rounded-xl px-3 py-2 text-xs"
-          >
-            <option value="ALL">All Modules</option>
-            <option value="EXECUTION">EXECUTION</option>
-            <option value="BINANCE_API">BINANCE_API</option>
-            <option value="MONITOR_1S">MONITOR_1S</option>
-            <option value="CANDLE_15S">CANDLE_15S</option>
-            <option value="SCANNER">SCANNER</option>
-            <option value="AI_CLUB">AI_CLUB</option>
-            <option value="NETWORK">NETWORK</option>
-            <option value="ENGINE">ENGINE</option>
-          </select>
+            onChange={(val) => setModuleFilter(val)}
+            ariaLabel="Filter Module"
+            className="min-w-[175px]"
+            options={[
+              { value: 'ALL', label: 'All Modules', badge: 'ALL' },
+              { value: 'EXECUTION', label: 'EXECUTION' },
+              { value: 'BINANCE_API', label: 'BINANCE_API' },
+              { value: 'MONITOR_1S', label: 'MONITOR_1S' },
+              { value: 'CANDLE_15S', label: 'CANDLE_15S' },
+              { value: 'SCANNER', label: 'SCANNER' },
+              { value: 'AI_CLUB', label: 'AI_CLUB' },
+              { value: 'NETWORK', label: 'NETWORK' },
+              { value: 'ENGINE', label: 'ENGINE' },
+            ]}
+          />
         </div>
 
         {/* Log Console */}
