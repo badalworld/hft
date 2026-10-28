@@ -37,6 +37,21 @@ export class BinanceWsStreamManager {
   private onMarkPriceTickCb: ((markMap: Map<string, number>) => void) | null = null;
   private onAccountUpdateCb: (() => void) | null = null;
 
+  // A blackholed edge completes the TLS upgrade and even ACKs SUBSCRIBE, then
+  // never sends a frame. Such a socket emits neither 'close' nor 'error', so
+  // without these timestamps the reconnect/edge-rotation path never fires and
+  // the engine sits on frozen prices while reporting "connected".
+  private lastMarketFrameAt = 0;
+  private lastAggFrameAt = 0;
+  private staleWatchdogTimer: NodeJS.Timeout | null = null;
+  private marketStaleStrikes = 0;
+  private aggStaleStrikes = 0;
+
+  // !markPrice@arr@1s publishes every second and the agg basket spans 40 liquid
+  // symbols, so silence well past these windows means the feed is dead.
+  private static readonly MARKET_STALE_MS = 15_000;
+  private static readonly AGG_STALE_MS = 25_000;
+
   constructor(
     private readonly rateGovernor: BinanceRateGovernor,
     private readonly restClient: BinanceFuturesRestClient,
@@ -72,6 +87,81 @@ export class BinanceWsStreamManager {
     this.running = true;
     this.connectMarketWs();
     this.connectAggTradeWs();
+    this.startStaleWatchdog();
+  }
+
+  public isMarketDataLive(): boolean {
+    return Date.now() - this.lastMarketFrameAt < BinanceWsStreamManager.MARKET_STALE_MS;
+  }
+
+  public isAggTradeDataLive(): boolean {
+    return Date.now() - this.lastAggFrameAt < BinanceWsStreamManager.AGG_STALE_MS;
+  }
+
+  public ingestRestTickerBatch(items: Ticker24hStreamItem[]) {
+    for (const item of items) {
+      if (item.lastPrice > 0) this.lastPrices.set(item.symbol, item.lastPrice);
+    }
+    if (this.onTickerBatchCb && items.length > 0) this.onTickerBatchCb(items);
+  }
+
+  public ingestRestPrices(prices: Map<string, number>) {
+    for (const [sym, px] of prices) {
+      if (px > 0) {
+        this.lastPrices.set(sym, px);
+        this.markPrices.set(sym, px);
+      }
+    }
+    if (this.onMarkPriceTickCb && prices.size > 0) this.onMarkPriceTickCb(this.markPrices);
+  }
+
+  private startStaleWatchdog() {
+    if (this.staleWatchdogTimer) return;
+    this.staleWatchdogTimer = setInterval(() => {
+      if (!this.running) return;
+      const now = Date.now();
+
+      if (this.marketWs?.readyState === WebSocket.OPEN) {
+        if (now - this.lastMarketFrameAt > BinanceWsStreamManager.MARKET_STALE_MS) {
+          this.marketStaleStrikes++;
+          this.rateGovernor.wsConnected = false;
+          this.updateStreamCount();
+          if (this.marketStaleStrikes <= 3 || this.marketStaleStrikes % 20 === 0) {
+            logger.warn(
+              'NETWORK',
+              `Binance Market WS is open but has delivered no data for ${Math.round(
+                (now - this.lastMarketFrameAt) / 1000
+              )}s — dropping it to rotate onto another fstream edge (strike ${this.marketStaleStrikes}).`
+            );
+          }
+          this.terminateSocket(this.marketWs);
+        }
+      }
+
+      if (this.aggTradeWs?.readyState === WebSocket.OPEN) {
+        if (now - this.lastAggFrameAt > BinanceWsStreamManager.AGG_STALE_MS) {
+          this.aggStaleStrikes++;
+          if (this.aggStaleStrikes <= 3 || this.aggStaleStrikes % 20 === 0) {
+            logger.warn(
+              'CANDLE_15S',
+              `aggTrade WS is open but silent for ${Math.round(
+                (now - this.lastAggFrameAt) / 1000
+              )}s — dropping it to rotate onto another fstream edge (strike ${this.aggStaleStrikes}).`
+            );
+          }
+          this.terminateSocket(this.aggTradeWs);
+        }
+      }
+    }, 5000);
+  }
+
+  private terminateSocket(ws: WebSocket | null) {
+    if (!ws) return;
+    try {
+      ws.terminate();
+    } catch {
+      // ignore
+    }
   }
 
   public async startUserDataStream() {
@@ -105,6 +195,10 @@ export class BinanceWsStreamManager {
     this.running = false;
     this.stopUserDataStream();
 
+    if (this.staleWatchdogTimer) {
+      clearInterval(this.staleWatchdogTimer);
+      this.staleWatchdogTimer = null;
+    }
     if (this.marketReconnectTimer) {
       clearTimeout(this.marketReconnectTimer);
       this.marketReconnectTimer = null;
@@ -190,11 +284,13 @@ export class BinanceWsStreamManager {
       this.marketWs = ws;
 
       ws.on('open', () => {
-        this.rateGovernor.wsConnected = true;
+        // Reset the staleness clock: the watchdog must measure silence since the
+        // handshake, not since the last frame of a previous dead socket.
+        this.lastMarketFrameAt = Date.now();
         this.updateStreamCount();
-        logger.success(
+        logger.info(
           'BINANCE_API',
-          'Connected to Binance Futures Market Multiplex WS (!ticker@arr + !markPrice@arr@1s).'
+          'Binance Futures Market Multiplex WS handshake complete — awaiting first data frame.'
         );
       });
 
@@ -205,6 +301,7 @@ export class BinanceWsStreamManager {
           const payload = msg.data;
 
           if (streamName === '!ticker@arr' && Array.isArray(payload)) {
+            this.markMarketFrame();
             const parsed: Ticker24hStreamItem[] = [];
             for (const item of payload) {
               if (!item?.s) continue;
@@ -223,6 +320,7 @@ export class BinanceWsStreamManager {
               this.onTickerBatchCb(parsed);
             }
           } else if (streamName === '!markPrice@arr@1s' && Array.isArray(payload)) {
+            this.markMarketFrame();
             for (const item of payload) {
               if (item?.s && item?.p) {
                 const mp = parseFloat(item.p);
@@ -266,6 +364,19 @@ export class BinanceWsStreamManager {
     }
   }
 
+  private markMarketFrame() {
+    this.lastMarketFrameAt = Date.now();
+    if (!this.rateGovernor.wsConnected) {
+      this.rateGovernor.wsConnected = true;
+      this.marketStaleStrikes = 0;
+      this.updateStreamCount();
+      logger.success(
+        'BINANCE_API',
+        'Binance Futures Market WS is delivering live data (!ticker@arr + !markPrice@arr@1s).'
+      );
+    }
+  }
+
   private scheduleMarketReconnect() {
     if (!this.running || this.marketReconnectTimer) return;
     this.marketReconnectTimer = setTimeout(() => {
@@ -284,7 +395,11 @@ export class BinanceWsStreamManager {
       this.subscribedAggSymbols.clear();
 
       ws.on('open', () => {
-        logger.info('CANDLE_15S', 'Connected to Binance Futures 15s aggTrade real-time builder WS.');
+        this.lastAggFrameAt = Date.now();
+        logger.info(
+          'CANDLE_15S',
+          'aggTrade WS handshake complete — subscribing 15s candle basket.'
+        );
         this.syncAggSubscriptions();
       });
 
@@ -292,6 +407,11 @@ export class BinanceWsStreamManager {
         try {
           const data = JSON.parse(raw.toString());
           if (data?.e === 'aggTrade' && data.s) {
+            if (this.aggStaleStrikes > 0) {
+              this.aggStaleStrikes = 0;
+              logger.success('CANDLE_15S', 'aggTrade WS is delivering live tape again.');
+            }
+            this.lastAggFrameAt = Date.now();
             const price = parseFloat(data.p);
             const qty = parseFloat(data.q);
             const tradeTime = Number(data.T) || Date.now();

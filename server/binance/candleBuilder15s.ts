@@ -21,6 +21,7 @@ const MAX_BARS_PER_SYMBOL = 80; // 20 minutes of 15-second bars
 
 export class CandleBuilder15s {
   private barsBySymbol = new Map<string, Candle15s[]>();
+  private lastTickAtBySymbol = new Map<string, number>();
   private onCandleCloseCallbacks: Array<(symbol: string, closedCandle: Candle15s) => void> = [];
   private boundaryTimer: NodeJS.Timeout | null = null;
 
@@ -51,6 +52,10 @@ export class CandleBuilder15s {
     emitCloseEvents = true
   ) {
     if (!Number.isFinite(price) || !Number.isFinite(qty) || price <= 0 || qty <= 0) return;
+
+    if (emitCloseEvents) {
+      this.lastTickAtBySymbol.set(symbol, Date.now());
+    }
 
     const bucketStart = Math.floor(tradeTimeMs / INTERVAL_MS) * INTERVAL_MS;
     let bars = this.barsBySymbol.get(symbol);
@@ -160,6 +165,11 @@ export class CandleBuilder15s {
     }
   }
 
+  // Only seals the bar whose window has elapsed. Deliberately does NOT open a
+  // synthetic successor: a feed outage would otherwise mint flat zero-volume
+  // bars every 15s and evict all real history within MAX_BARS_PER_SYMBOL,
+  // silently pinning RSI to 50 and the orderflow ratio to 1 forever.
+  // ingestAggTrade opens (and gap-fills) the next bucket when real ticks return.
   private flushClosedBoundaries(nowMs: number) {
     const currentBucket = Math.floor(nowMs / INTERVAL_MS) * INTERVAL_MS;
     for (const [symbol, bars] of this.barsBySymbol.entries()) {
@@ -168,26 +178,21 @@ export class CandleBuilder15s {
       if (lastBar.openTime < currentBucket && !lastBar.isClosed) {
         lastBar.isClosed = true;
         this.emitClosed(symbol, lastBar);
-        bars.push({
-          symbol,
-          openTime: currentBucket,
-          closeTime: currentBucket + INTERVAL_MS - 1,
-          open: lastBar.close,
-          high: lastBar.close,
-          low: lastBar.close,
-          close: lastBar.close,
-          volume: 0,
-          quoteVolume: 0,
-          buyVolume: 0,
-          sellVolume: 0,
-          tradeCount: 0,
-          isClosed: false,
-        });
-        if (bars.length > MAX_BARS_PER_SYMBOL) {
-          bars.splice(0, bars.length - MAX_BARS_PER_SYMBOL);
-        }
       }
     }
+  }
+
+  public getLastTickAt(symbol: string): number {
+    return this.lastTickAtBySymbol.get(symbol) || 0;
+  }
+
+  public getFreshSymbolCount(maxAgeMs: number): number {
+    const cutoff = Date.now() - maxAgeMs;
+    let n = 0;
+    for (const at of this.lastTickAtBySymbol.values()) {
+      if (at >= cutoff) n++;
+    }
+    return n;
   }
 
   private emitClosed(symbol: string, bar: Candle15s) {
@@ -204,6 +209,7 @@ export class CandleBuilder15s {
     for (const sym of this.barsBySymbol.keys()) {
       if (!keepSymbols.has(sym)) {
         this.barsBySymbol.delete(sym);
+        this.lastTickAtBySymbol.delete(sym);
       }
     }
   }

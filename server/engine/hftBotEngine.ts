@@ -16,6 +16,7 @@ import { BinanceWsStreamManager } from '../binance/wsStreamManager.js';
 import { AiAgentClubOrchestrator } from '../ai/agentClubGraph.js';
 import { StateStore } from './stateStore.js';
 import { MarketScanner40 } from './marketScanner.js';
+import { RestMarketFeed } from './restMarketFeed.js';
 import { PositionMonitor1s } from './positionMonitor1s.js';
 import { evaluate15sPullbackStrategy } from './strategy15s.js';
 import { f6, formatOrderQty, maskApiKey } from '../utils/format.js';
@@ -33,6 +34,7 @@ export class HftBotEngine {
     this.candleBuilder
   );
   public readonly scanner: MarketScanner40;
+  public readonly restMarketFeed: RestMarketFeed;
   public readonly positionMonitor: PositionMonitor1s;
   public readonly aiClub: AiAgentClubOrchestrator;
 
@@ -67,6 +69,7 @@ export class HftBotEngine {
 
   constructor() {
     this.scanner = new MarketScanner40(this.restClient, this.wsManager, this.candleBuilder);
+    this.restMarketFeed = new RestMarketFeed(this.restClient, this.wsManager, this.candleBuilder);
     this.positionMonitor = new PositionMonitor1s(this.stateStore);
     this.aiClub = new AiAgentClubOrchestrator({
       styleParams: this.stateStore.getStyleParams(),
@@ -396,9 +399,24 @@ export class HftBotEngine {
     });
 
     this.wsManager.updateWatchedAggTradeSymbols(watchedSymbols);
+    this.restMarketFeed.setWatchedSymbols(watchedSymbols);
+
+    // Fail over to the REST market data feed when the aggTrade stream is dead,
+    // and stand it down the moment the WebSocket tape returns. The 20s grace
+    // period lets a healthy stream prove itself before boot engages the fallback.
+    if (this.tickCounter > 20) {
+      const wsTapeLive = this.wsManager.isAggTradeDataLive();
+      if (!wsTapeLive && !this.restMarketFeed.isActive()) {
+        this.restMarketFeed.start();
+      } else if (wsTapeLive && this.restMarketFeed.isActive()) {
+        this.restMarketFeed.stop();
+      }
+    }
 
     if (this.tickCounter % 60 === 0) {
-      this.candleBuilder.pruneSymbolsExcept(new Set(watchedSymbols));
+      const keep = new Set(watchedSymbols);
+      this.candleBuilder.pruneSymbolsExcept(keep);
+      this.restMarketFeed.pruneSymbolsExcept(keep);
     }
 
     // 4. Push real-time 1s snapshot to UI

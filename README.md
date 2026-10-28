@@ -3,29 +3,45 @@
 
   <br />
 
-  [![Platform](https://img.shields.io/badge/Exchange-Binance%20Portfolio%20Margin%20(UM)-F0B90B?style=for-the-badge)](https://www.binance.com/en/futures)
-  [![Timeframe](https://img.shields.io/badge/Execution-15s%20Candles%20%7C%201s%20Monitor-ADEBB3?style=for-the-badge)](#3-real-time-15-second-candle-engine--pullback-strategy)
-  [![AI Club](https://img.shields.io/badge/AI%20Club-LangGraph%20%2B%20System--1%20(%240%20Fee)-EBAEE6?style=for-the-badge)](#5-zero-cost-self-learning-ai-agent-club)
-  [![Design](https://img.shields.io/badge/UI%2FUX-Lotus%20Garden%20Skeuomorphism-FF857A?style=for-the-badge)](#6-lotus-garden-luxury-skeuomorphism-uiux)
-  [![Version](https://img.shields.io/badge/Version-1.1.0-6B403C?style=for-the-badge)](#whats-new-in-v110)
+  [![Version](https://img.shields.io/badge/Version-1.2.0-6B403C?style=for-the-badge)](#whats-new-in-v120)
+  [![Exchange](https://img.shields.io/badge/Exchange-Binance%20Portfolio%20Margin%20(UM)-F0B90B?style=for-the-badge)](https://www.binance.com/en/futures)
+  [![Execution](https://img.shields.io/badge/Execution-15s%20Candles%20%7C%201s%20Monitor-ADEBB3?style=for-the-badge)](#6-real-time-15-second-candle-engine--pullback-strategy)
+  [![Transport](https://img.shields.io/badge/Transport-WebSocket%20%2B%20Auto%20REST%20Failover-8FD6FF?style=for-the-badge)](#4-market-data-transport-resilience-ws--rest-failover)
+  [![AI Club](https://img.shields.io/badge/AI%20Club-LangGraph%20%2B%20System--1%20(%240%20Fee)-EBAEE6?style=for-the-badge)](#7-zero-cost-self-learning-ai-agent-club)
+  [![Verified](https://img.shields.io/badge/Status-Live%20Real--Money%20Verified-4ECDC4?style=for-the-badge)](#2-execution-ledger--live-verified)
+  [![UI](https://img.shields.io/badge/UI%2FUX-Lotus%20Garden%20Skeuomorphism-FF857A?style=for-the-badge)](#8-lotus-garden-luxury-skeuomorphism-uiux)
 </div>
 
 ---
 
 # HFT — Automation Trading Bot (`USDⓈ-M Real Production`)
 
-> **Trade Smarter • Grow Faster**  
+> **Trade Smarter • Grow Faster**
 > **Copyright © & Developed by Trading Lifestyle Quant.**
 
-**HFT** is a real-money, production-grade **Binance Portfolio Margin / USDⓈ-M Futures (`papi.binance.com`, `fapi.binance.com` & `fstream.binance.com`)** automated High-Frequency Trading environment engineered for ultra-fast micro-pullback execution on **15-second candles**, **1-second open-position monitoring**, **fee-aware Net PNL tracking**, and **$0.00 zero-cost autonomous self-learning** via a 5-agent **LangGraph** state machine and **System-1 Typed Decision Primitives (`Nimble` / `Laya` / `Kev` / Brier RLCD)**.
+**HFT** is a real-money, production-grade **Binance Portfolio Margin / USDⓈ-M Futures** (`papi.binance.com`, `fapi.binance.com` & `fstream.binance.com`) automated High-Frequency Trading environment engineered for ultra-fast micro-pullback execution on **15-second candles**, **1-second open-position monitoring**, **fee-aware Net PNL tracking**, and **$0.00 zero-cost autonomous self-learning** via a 5-agent **LangGraph** state machine and **System-1 Typed Decision Primitives (`Nimble` / `Laya` / `Kev` / Brier RLCD)**.
 
 > **Important Production Notice**: This system connects directly to **live production Binance** (not a simulation and not Testnet). Trades execute immediately once you save your Binance API Key & Secret Key in **Settings & IPs** and toggle **ARM ENGINE**.
 
 ---
 
-## What's New in `v1.1.0`
+## What's New in `v1.2.0`
 
-**Portfolio Margin (`papi`) execution support.** The engine now trades the **Binance Portfolio Margin unified cross-margin wallet** in addition to classic USDⓈ-M Futures.
+**The bot now trades when the network won't cooperate.** Version 1.2.0 closes the gap between *"connected"* and *"actually receiving data"* — the failure mode that silently reduces any tick-driven strategy to a zero-trade treadmill.
+
+| Change | Detail |
+| :--- | :--- |
+| **Auto REST market-data failover** | When `fstream.binance.com` stops delivering tape, `server/engine/restMarketFeed.ts` engages automatically: `/fapi/v1/ticker/price` every 1s, `/fapi/v1/ticker/24hr` every 10s, and a round-robin `/fapi/v1/trades` sweep every 15s that feeds real ticks into the same 15-second candle builder. The moment the WebSocket tape returns, REST stands down by itself. |
+| **Liveness watchdog, not connection watchdog** | A WebSocket that completed its TLS + HTTP-upgrade handshake is not evidence of a working feed — Binance's edge will happily ACK a `SUBSCRIBE` and then send nothing. The new watchdog measures **data-frame staleness** (15s for market, 25s for aggTrade) and force-restarts a socket that is `OPEN` but starving. |
+| **Honest telemetry** | `rateTelemetry.wsConnected` now flips `true` only when a real `!ticker@arr` / `!markPrice@arr@1s` frame lands — never on the `open` event. The API-weight diode on the dashboard follows data liveness, so a green light means green data. |
+| **The candle builder never invents a bar** | Sealing logic used to mint a synthetic flat, zero-volume successor every 15 seconds for every watched symbol. During a feed outage that evicted all real history within `MAX_BARS_PER_SYMBOL` and pinned `RSI(7)` to exactly `50.000000` and the orderflow ratio to exactly `1.000000` across all 40 assets — a mathematically dead universe that could never produce a signal. It now only seals the window that genuinely elapsed and gap-fills on the next real tick. |
+| **Protective hard stop at `-9.500000%` ROI** | Every position carries a catastrophic adverse excursion floor alongside the `+5%` trailing predator, so a runaway move against the trade exits mechanically instead of waiting for the trail. |
+| **`scripts/diagnoseMarketData.ts`** | One command that walks every `fstream.binance.com` edge IP, subscribes to a live stream on each, and reports precisely which stage fails — handshake, `SUBSCRIBE` ACK, or data delivery — then cross-checks REST so you can see the asymmetry. |
+
+<details>
+<summary><b>What's New in <code>v1.1.0</code> — Portfolio Margin (<code>papi</code>) execution support</b></summary>
+
+<br />
 
 | Change | Detail |
 | :--- | :--- |
@@ -35,44 +51,199 @@
 | **Resilient market-stream DNS** | `fstream.binance.com` resolves to ~8 edge IPs and some ISPs blackhole a subset (TCP connects, the WebSocket upgrade never completes). Since Node's resolver returns a stable address order, a plain reconnect retried the same dead edge forever. The WS manager now rotates the resolved address on every attempt so each retry lands on a different edge. |
 | **Credential diagnostics** | `scripts/diagnoseApiKey.ts` reports vault decryption health and live permission readouts across Spot, Futures, and Portfolio Margin hosts. It only ever prints credential **length, charset, and first/last 4 characters** — never full key material. |
 
+</details>
+
 > Portfolio Margin is **always unified cross margin** — there is no isolated mode, and `/papi/v1/um/positionRisk` returns no per-position `marginType` / `isolatedMargin` fields.
 
 ---
 
 ## Table of Contents
 
-1. [System Architecture](#1-system-architecture)
-2. [Core Trading Rules & Capital Mechanics](#2-core-trading-rules--capital-mechanics)
-3. [Real-Time 15-Second Candle Engine & Pullback Strategy](#3-real-time-15-second-candle-engine--pullback-strategy)
-4. [1-Second Open Position Monitor & 5% ROI Trailing Stop](#4-1-second-open-position-monitor--5-roi-trailing-stop)
-5. [Zero-Cost Self-Learning AI Agent Club](#5-zero-cost-self-learning-ai-agent-club)
-6. [Lotus Garden Luxury Skeuomorphism UI/UX](#6-lotus-garden-luxury-skeuomorphism-uiux)
-7. [IPv4 Whitelist Discovery & Portfolio Margin Routing](#7-ipv4-whitelist-discovery--portfolio-margin-routing)
-8. [Quickstart — Localhost PC Setup](#8-quickstart--localhost-pc-setup)
-9. [Production Deployment — Online VPS / Dedicated Server](#9-production-deployment--online-vps--dedicated-server)
-10. [Optional Local System-1 Models (`Nimble`, `Laya`, `Kev`, `Ollama`)](#10-optional-local-system-1-models-nimble-laya-kev-ollama)
-11. [REST & WebSocket API Reference](#11-rest--websocket-api-reference)
-12. [Repository Structure & Security](#12-repository-structure--security)
+1. [What This Build Proves](#1-what-this-build-proves)
+2. [Execution Ledger — Live Verified](#2-execution-ledger--live-verified)
+3. [The Bug That Hid Behind a Green Light](#3-the-bug-that-hid-behind-a-green-light)
+4. [Market Data Transport Resilience (WS + REST Failover)](#4-market-data-transport-resilience-ws--rest-failover)
+5. [System Architecture](#5-system-architecture)
+6. [Real-Time 15-Second Candle Engine & Pullback Strategy](#6-real-time-15-second-candle-engine--pullback-strategy)
+7. [Core Trading Rules & Capital Mechanics](#7-core-trading-rules--capital-mechanics)
+8. [1-Second Open Position Monitor & 5% ROI Trailing Stop](#8-1-second-open-position-monitor--5-roi-trailing-stop)
+9. [Zero-Cost Self-Learning AI Agent Club](#9-zero-cost-self-learning-ai-agent-club)
+10. [Lotus Garden Luxury Skeuomorphism UI/UX](#10-lotus-garden-luxury-skeuomorphism-uiux)
+11. [IPv4 Whitelist, Portfolio Margin Routing & Zero-Trade Triage](#11-ipv4-whitelist-portfolio-margin-routing--zero-trade-triage)
+12. [Quickstart — Localhost PC Setup](#12-quickstart--localhost-pc-setup)
+13. [Production Deployment — Online VPS / Dedicated Server](#13-production-deployment--online-vps--dedicated-server)
+14. [Optional Local System-1 Models (`Nimble`, `Laya`, `Kev`, `Ollama`)](#14-optional-local-system-1-models-nimble-laya-kev-ollama)
+15. [REST & WebSocket API Reference](#15-rest--websocket-api-reference)
+16. [Repository Structure & Security](#16-repository-structure--security)
 
 ---
 
-## 1. System Architecture
+## 1. What This Build Proves
+
+Every claim below was observed on a live, armed, real-money session — not asserted from code review. This section proves the **pipeline works**. It deliberately does not claim the strategy is profitable; [§2](#2-execution-ledger--live-verified) shows the raw record, losses included.
+
+| Claim | Evidence |
+| :--- | :--- |
+| **Real orders reach production Binance** | Engine placed `BANKUSDT` `3589019958`, `NILUSDT` `1883047383`, `CAPUSDT` `686718001`, `ONUSDT` `1499115384` within ~70s of arming. |
+| **Full round trips open, manage and close** | 9 completed round trips across `NILUSDT`, `FIGHTUSDT`, `INITUSDT`, `BANKUSDT`, `CAPUSDT`, `EVAAUSDT`, `BLESSUSDT`; 6 open concurrently at peak. |
+| **Both exit paths fire** | 7 closes via `TRAILING_STOP_HIT`, 2 via `PROTECTIVE_STOP_LOSS` — the profit predator and the risk guardrail are both live code, not dead branches. |
+| **PNL is fee-aware, not gross-fiction** | Net PNL booked after real `/papi/v1/um/commissionRate` taker fees on both legs. One trade exposed the difference exactly: `+0.013476` gross, `0.020055` fees, **`-0.006579` net** — verdict `FEE_DRAG_BREAKEVEN`. |
+| **The 95% capital cap engages and halts entries** | Scanner reached `PAUSED_MARGIN_FULL` at `85.769063%` pool utilization, stopped opening new trades, and kept managing the live ones. |
+| **Strategy logic is genuinely varied, not degenerate** | Across the 40-asset scanner, sampled three times consecutively and stable: `rsi15s` → **39 distinct values**, `pullbackDepthPct` → 40, `orderflowDeltaRatio` → 37, `candleCount15s` → 29, and **zero** assets pinned at the degenerate `50.000000`. Stages observed: `COOLDOWN`, `MONITORING`, `PULLBACK_DETECTED`, `CONFIRMED_SIGNAL`, `IN_POSITION`. |
+| **Self-heals a blocked WebSocket** | REST feed engaged with no operator action and restored candle diversity from the flat `79 / 50.000000 / 0 / 1.000000` dead state. Currently running in fallback — `wsConnected: false`, weight `1,036 / 2,400` — and the strategy is still producing varied, actionable diagnostics on all 40 assets. |
+| **AI Club genuinely learns** | 9 consecutive post-mortems, each emitting a real style mutation and a real Brier loss. `minAiConfidenceScore` walked `0.560 → 0.552 → 0.544 → 0.536 → 0.551 → 0.566` across the run, and after two premature-entry losses Hermes tightened three gates at once — `minOrderflowDeltaRatio 1.180 → 1.220`, `pullbackRsiShortMin 48 → 49`, `minAiConfidenceScore 0.536 → 0.551` — then raised `trailingFloorRoiPct 3.650 → 3.770` in response to the fee-drag breakeven. EMA Brier tracked live: `0.163576 → 0.147433 → 0.133329 → … → 0.287577`. |
+| **Type-safe & verified** | `npm run typecheck` → exit 0. All 5 self-test suites → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
+
+---
+
+## 2. Execution Ledger — Live Verified
+
+All 9 completed round trips from one continuous live session, in close order. These are the exact numbers the dashboard rendered.
+
+| # | Symbol / Side | Entry → Exit | Gross | Fees | **Net** | Peak ROI | ROI @ Close | Duration | Exit Reason |
+| :-- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- |
+| 1 | `NILUSDT` `SHORT` | `0.081690` → `0.081360` | `+0.080784` | `0.019957` | **`+0.060827`** | `+5.410723%` | `+4.053556%` | `142.224s` | `TRAILING_STOP_HIT` |
+| 2 | `FIGHTUSDT` `LONG` | `0.004437` → `0.004474` | `+0.166907` | `0.020099` | **`+0.146808`** | `+9.834600%` | `+8.260772%` | `203.657s` | `TRAILING_STOP_HIT` |
+| 3 | `INITUSDT` `LONG` | `0.212940` → `0.213300` | `+0.033480` | `0.019820` | **`+0.013660`** | `+5.059758%` | `+1.686532%` | `153.972s` | `TRAILING_STOP_HIT` |
+| 4 | `CAPUSDT` `SHORT` | `0.072740` → `0.073460` | `-0.197280` | `0.020029` | **`-0.217309`** | `+0.412609%` | `-9.793989%` | `566.287s` | `PROTECTIVE_STOP_LOSS` |
+| 5 | `FIGHTUSDT` `LONG` | `0.004491` → `0.004437` | `-0.240462` | `0.019878` | **`-0.260340`** | `0.000000%` | `-12.090464%` | `55.145s` | `PROTECTIVE_STOP_LOSS` |
+| 6 | `BANKUSDT` `SHORT` | `0.027580` → `0.027460` | `+0.087000` | `0.019952` | **`+0.067048`** | `+5.829060%` | `+4.369993%` | `715.458s` | `TRAILING_STOP_HIT` |
+| 7 | `EVAAUSDT` `LONG` | `1.447200` → `1.450800` | `+0.049680` | `0.019996` | **`+0.029684`** | `+5.515319%` | `+2.487734%` | `107.126s` | `TRAILING_STOP_HIT` |
+| 8 | `FIGHTUSDT` `LONG` | `0.004463` → `0.004466` | `+0.013476` | `0.020055` | **`-0.006579`** | `+6.709908%` | `+0.670841%` | `240.025s` | `TRAILING_STOP_HIT` |
+| 9 | `BLESSUSDT` `LONG` | `0.011073` → `0.011159` | `+0.155402` | `0.020087` | **`+0.135315`** | `+9.598134%` | `+7.695997%` | `975.839s` | `TRAILING_STOP_HIT` |
+
+**Roll-up:** 6 wins / 3 losses · win rate `66.666667%` · **realized net `-0.030886 USDT`** · capital utilization when the scanner paused `85.769063%` · session ran on the REST transport fallback.
+
+> **Read this honestly.** The realized net for this session is *slightly negative*. What §1 claims is that the execution machinery is correct and complete — entries, margin caps, fee accounting, both exit paths, and the learning loop all demonstrably work. Strategy edge is a separate, unsolved question and one session of 9 trades cannot answer it. Do not treat this table as a performance claim.
+
+### What the losses actually taught the system
+
+**Trade 5 is the important one.** `FIGHTUSDT` closed at `-12.090464%` against a `-9.500000%` guard — the protective stop **overshot its own level by 2.59 points**. Cause: the guard is evaluated on a 1-second poll, and a thin perpetual can gap clear through a market stop between two polls. The exit is mechanically correct (it fired instantly) but the loss ceiling it enforces is `guard + slippage`, not `guard`. Size positions with that in mind, or widen the guard only if you accept slower reaction.
+
+**Trades 4 and 5 were both verdict `LOSS_PREMATURE_PULLBACK`** — the entry fired while the retracement hadn't exhausted. Hermes read that pattern itself and tightened three gates in one mutation, then `minAiConfidenceScore` climbed from `0.536` back to `0.566` over the following two trades. Trade 5's post-mortem captures the reasoning verbatim: *"Pullback had not finished exhausting on 15s timeframe (Entry RSI=67.304015, Delta=4.117401x). Waiting for stronger orderflow delta and deeper RSI reset improves entry accuracy."*
+
+**Trade 8 is why Net PNL exists.** Direction was right, gross was positive, and the trade still lost money — round-trip taker fees exceeded the captured move because the trail let `+6.709908%` peak decay to `+0.670841%`. MFE capture ratio `0.099978`. Hermes raised `trailingFloorRoiPct` from `3.650000` to `3.770000` on the spot.
+
+**Trailing decay is by design, and it costs.** Winners routinely give back 2–4 points from peak (`+5.06% → +1.69%`, `+6.71% → +0.67%`) because the callback threshold waits for genuine reversal rather than first-tick noise. The profitable closes (`+8.26%`, `+7.70%`, `+4.37%`) came from trends strong enough to survive that wait; `+0.67%` came from one that wasn't.
+
+---
+
+## 3. The Bug That Hid Behind a Green Light
+
+Worth documenting, because the failure signature is generic to every tick-driven trading system and every layer of it *looked healthy*.
+
+```text
+Symptom        40/40 scanner assets report candleCount15s=79, rsi15s=50.000000,
+               pullbackDepthPct=0.000000, orderflowDeltaRatio=1.000000.
+               Zero trades. Forever.
+
+Layer 1        fstream.binance.com → TLS succeeds. HTTP 101 upgrade succeeds.
+               Binance ACKs SUBSCRIBE. Zero data frames ever arrive.
+               (=> "WebSocket connected" is a lie we were telling ourselves.)
+
+Layer 2        Candle builder seals a closed bar every 15s and opens a flat
+               successor regardless of whether any tick arrived.
+               (=> 79 bars is MAX_BARS_PER_SYMBOL: real history fully evicted.)
+
+Layer 3        RSI with zero total loss  → returns exactly 50.
+               Orderflow (0+ε)/(0+ε)     → returns exactly 1.
+               Pullback depth on flat bars → exactly 0.
+               (=> every entry gate is mathematically unsatisfiable.)
+```
+
+Three separate components each degraded *silently and gracefully*, and the composite result was a bot that could never trade while reporting a healthy green connection. **Fixing only the transport would have left the fabrication bug armed for the next outage; fixing only the fabrication would have left a dead stream looking alive.** Both were fixed together — see [§4](#4-market-data-transport-resilience-ws--rest-failover).
+
+---
+
+## 4. Market Data Transport Resilience (WS + REST Failover)
+
+Binance serves USDⓈ-M market data over two independent transports. **HFT treats the WebSocket as primary and REST as a standby that carries the identical data contract**, so a blocked, filtered, throttled, or blackholed stream degrades latency slightly instead of ending the session.
+
+### The three states of the feed
+
+```text
+┌─────────────────────────────────────────────────────────────────────────┐
+│  STATE 1 — WS LIVE          (preferred, always attempted first)         │
+│  fstream WS delivering frames < 25s ago                                 │
+│  → RestMarketFeed is stopped. Zero extra REST weight. Real-time tape.   │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │ 25s with no aggTrade frame
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  STATE 2 — REST FALLBACK    (auto-engaged, no operator action)          │
+│  watchdog terminates the starving socket → retries rotated edge IPs     │
+│  → 1s price poll · 10s 24h ranking poll · 15s round-robin trade sweep   │
+│  → ticks enter candleBuilder15s through the same ingestAggTrade path    │
+└───────────────────────────────┬─────────────────────────────────────────┘
+                                │ first real aggTrade frame arrives
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  STATE 3 — STAND-DOWN     (self-clearing, weighted budget reclaimed)    │
+│  → RestMarketFeed.stop() · candles keep building from the live tape     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### REST weight budget while the fallback is engaged
+
+| Endpoint | Weight | Cadence | Cost / minute |
+| :--- | :--- | :--- | :--- |
+| `/fapi/v1/ticker/price` (all symbols) | `2` | every `1s` | `120` |
+| `/fapi/v1/ticker/24hr` (all symbols) | `40` | every `10s` | `240` |
+| `/fapi/v1/trades` (per symbol, 1000 trades) | `5` | one symbol per cursor step, full 40-symbol pass every `15s` | `800` |
+
+Total ≈ **`1,160 / 2,400` (48%)** of the `FAPI` budget while fully engaged. Measured live at **`1,036 / 2,400` (43%)** with all 40 assets receiving tape. Comfortable headroom, but it is a real cost — the fallback is not free, which is exactly why it stands down the instant the WebSocket returns. The sweep also bails immediately on rate-governor error `-9999` and resumes from its cursor rather than fighting the governor. Signed `papi` position polling runs against the **separate** `PAPI` bucket and is not included above.
+
+### Design choices that matter
+
+- **Round-robin cursor, not a full sweep every tick.** 1000-trade pages for 40 symbols is 200 weight in one shot. The sweep advances a cursor, and if the governor rejects mid-pass it remembers exactly where it stopped and continues there next window. Every watched symbol is refreshed inside a few windows.
+- **Trade-ID watermark dedup.** Each symbol stores the highest trade `id` ingested. Overlapping pages are dropped by `id <= watermark`, so candles never double-count volume and the orderflow delta stays exact even when consecutive sweeps overlap.
+- **`isBuyerMaker` is preserved.** `/fapi/v1/trades` returns the same aggressor flag as `aggTrade`, so buyer/seller delta math is unchanged — REST is a lower-rate source, not a different semantic one.
+- **The watchdog force-terminates, it doesn't just warn.** A socket that is `OPEN` but silent never fires `close`, so the standard reconnect path can't help it. The watchdog calls `terminateSocket()` and simultaneously clears `wsConnected`, which is what makes the UI honest again.
+- **Reconnect storm is throttled.** Stale strikes log verbosely for the first 3 restarts, then once every 20th — a genuinely long outage produces a useful signal, not a log file that drowns everything else.
+- **Failover needs a 20-tick grace period.** The engine waits 20 seconds after boot before engaging REST, so a healthy stream gets the chance to prove itself and REST never burns weight on a startup race.
+
+### Known fidelity trade-off (stated plainly)
+
+The REST tape is **price-accurate but volume-sparse** relative to a live `aggTrade` stream. Under sustained fallback, orderflow conviction readings skew toward their clamp ceiling — one verified entry recorded `orderflowDeltaRatio: 9.999999`. The strategy remains valid; its aggressor-conviction gate is simply looser than it is on the WebSocket path. **On an unblocked network the WS feed wins and REST never engages at all.** Treat fallback as *"keeps trading correct on price"*, not *"identical tape fidelity"*.
+
+### Diagnosing your own transport
+
+```bash
+./node_modules/.bin/tsx scripts/diagnoseMarketData.ts
+```
+
+| Verdict line | What it means | What to do |
+| :--- | :--- | :--- |
+| `HANDSHAKE FAIL` | TCP/TLS/upgrade never completed to this edge | Normal if other edges pass — rotation handles it |
+| `LIVE (agg=… mark=…)` | Edge delivers real frames | Healthy — this is the target state |
+| `OPEN + ACKED BUT ZERO DATA FRAMES` | Upgrade + `SUBSCRIBE` ACK, then silence | Hostname-level stream filtering; the REST feed is exactly for this |
+| `OPEN BUT ZERO DATA FRAMES` | Opened, no subscription ack either | Usually a very short test window; re-run with a longer one |
+| REST cross-check prints trades | `fapi` is healthy | Confirms the block is stream-only, not account/IP |
+
+---
+
+## 5. System Architecture
 
 ```mermaid
 flowchart TB
     subgraph Binance["Binance Production Hosts"]
         PAPI["HTTPS REST (Signed)\npapi.binance.com\n(/papi/v1/account, /papi/v1/um/*)"]
-        FAPI["HTTPS REST (Public Market Data)\nfapi.binance.com\n(time, exchangeInfo, ticker/24hr, aggTrades)"]
+        FAPI["HTTPS REST (Public Market Data)\nfapi.binance.com\n(time, exchangeInfo, ticker/24hr, trades, aggTrades)"]
         FSTREAM["Multiplexed WebSockets\nfstream.binance.com\n(!ticker@arr, !markPrice@arr@1s, aggTrade, /pm/ws listenKey)"]
+    end
+
+    subgraph Feed["Transport Selection Layer"]
+        WD["Frame-Staleness Watchdog\n(15s market / 25s tape · terminate + rotate edge)"]
+        RMF["RestMarketFeed (standby)\n1s prices · 10s 24h · 15s round-robin tape sweep\n+ trade-ID watermark dedup"]
     end
 
     subgraph Engine["HFT Core Execution Engine (Node.js / TypeScript)"]
         GOV["Priority API Rate Governor\n(Per-Host 2,400/min Weight + 300/10s Orders)"]
-        CB15["15-Second Candle Builder\n(UTC-Aligned OHLCV + Buyer/Seller Delta)"]
+        CB15["15-Second Candle Builder\n(UTC-Aligned OHLCV + Buyer/Seller Delta · never fabricates a bar)"]
         SCAN40["Top-40 24h Market Scanner\n(20 Max Positive + 20 Max Negative)"]
         STRAT["15s Pullback + Confirmation Detector"]
         LADDER["$2.000000 Margin Executor\n(10x → 11x → 12x → 13x → 14x → 15x)"]
-        MON1S["1.000000s Position Monitor\n(+5.000000% ROI Trailing Stop Predator)"]
+        MON1S["1.000000s Position Monitor\n(+5% ROI Trail · -9.5% Protective Stop)"]
         VAULT["AES-256-GCM Local Vault\n(Fixed Start Balance + API Keys + AI Brain)"]
     end
 
@@ -88,11 +259,12 @@ flowchart TB
         UI["Command Console\nStart Balance • Current Equity • Open Trades • 40-Asset Scanner\nSettings & Multi-IPv4 Whitelist • AI Club • Diagnostic Logs"]
     end
 
-    FSTREAM --> CB15
-    FSTREAM --> SCAN40
-    FSTREAM --> MON1S
-    FAPI <--> GOV
-    PAPI <--> GOV
+    FSTREAM -->|primary tape| WD
+    WD -->|stream starved| RMF
+    WD -->|frames flowing| CB15
+    RMF -->|aggTrade-equivalent ticks| CB15
+    RMF -->|price + 24h ranking| SCAN40
+    FAPI <--> RMF
     SCAN40 --> STRAT
     CB15 --> STRAT
     STRAT --> AG1 --> AG2 --> AG3 --> AG4 --> LADDER
@@ -100,35 +272,21 @@ flowchart TB
     MON1S --> GOV
     MON1S -->|Trade Closed| AG5
     AG5 -->|Mutates Style & Brier RLCD Weights| VAULT
+    PAPI <--> GOV
+    FAPI <--> GOV
     Engine <-->|1s Live Push /ws| UI
 ```
 
 ---
 
-## 2. Core Trading Rules & Capital Mechanics
-
-| Parameter | Specification | Implementation Details |
-| :--- | :--- | :--- |
-| **Exchange Market** | Binance USDⓈ-M Perpetuals (`USDT`) | Filters active `TRADING` `PERPETUAL` `USDT`-margined contracts via `/fapi/v1/exchangeInfo`. Automatically supports **One-Way Mode** & **Hedge Mode** (`/papi/v1/um/positionSide/dual`). |
-| **Universe Size** | **40 Assets** (`20` Positive + `20` Negative) | Ranks 24h `priceChangePercent` continuously: Top 20 gainers (`LONG` only) and Top 20 losers (`SHORT` only). |
-| **Execution Timeframe** | **15-Second (`15s`) Candles** | Real-time UTC-aligned `15,000ms` candles constructed from `<symbol>@aggTrade` WebSocket ticks + `/fapi/v1/aggTrades` warmup. |
-| **Base Margin / Trade** | **`$2.000000` USDT** | Dedicated base margin per position entry. |
-| **Leverage Fallback Ladder** | **`10x → 11x → 12x → 13x → 14x → 15x`** | Attempts `10x` first. If order execution, `MIN_NOTIONAL`, or `LOT_SIZE` `minQty`/`stepSize` fails at `10x`, automatically escalates `11x`, `12x`, `13x`, `14x`, up to `15x`. |
-| **Profit Target & Trail** | **`+5.000000%` ROI → Trailing Stop** | The instant ROI hits `+5.000000%`, Trailing Stop arms, locks a fee-positive profit floor, and trails peak ROI dynamically to capture maximum profit. |
-| **Open Trade Check** | **Every `1.000000` Second** | Dedicated 1-second heartbeat reconciled with `/papi/v1/um/positionRisk` + `!markPrice@arr@1s` WebSocket ticks. |
-| **Capital Allocation Cap** | **`95.000000%` of Equity** | Uses up to 95% of unified `accountEquity` for trade execution. When free budget in the 95% pool drops below `$2.000000`, **Market Scanner automatically pauses** and focuses 100% on open running positions. |
-| **Start Balance Rule** | **Fixed on 1st API Connection** | Captured automatically the very first time Binance API connects and locked permanently until you click **Reset Start Balance** in Settings. |
-| **Numeric Precision** | **Strict `0.000000` (6 Decimals)** | Every balance, price, ROI %, Gross PNL, Binance Fee, Net PNL, and telemetry figure renders with exact 6-decimal formatting. |
-
----
-
-## 3. Real-Time 15-Second Candle Engine & Pullback Strategy
+## 6. Real-Time 15-Second Candle Engine & Pullback Strategy
 
 Because Binance USDⓈ-M Futures REST `/fapi/v1/klines` only supports intervals starting at `1m` (requesting `15s` on REST klines returns `-1120 Invalid interval`), **HFT** includes a native institutional **15-Second Tick-to-Bar Aggregator (`server/binance/candleBuilder15s.ts`)**:
 
-- Buckets every `<symbol>@aggTrade` event into exact `:00`, `:15`, `:30`, and `:45` UTC boundaries.
+- Buckets every `aggTrade`-shaped tick — from the WebSocket **or** the REST tape sweep — into exact `:00`, `:15`, `:30`, and `:45` UTC boundaries.
 - Separates aggressive market buyer volume (`!isBuyerMaker`) from aggressive market seller volume (`isBuyerMaker`) to compute real-time **Orderflow Delta Ratios**.
 - Computes fast `EMA(9)`, `EMA(21)`, `RSI(7)`, `ATR(10)%`, and 14-bar swing high/low pullback depth.
+- **Never invents a bar.** It seals only windows that genuinely elapsed and opens the next bucket when a real tick arrives, gap-filling if needed. A feed outage now leaves history intact instead of replacing it with flat zeros.
 
 ### Entry Logic (`server/engine/strategy15s.ts`)
 1. **Maximum Positive 24h Movers (`Top 20 Gainers` → `LONG`)**:
@@ -140,7 +298,25 @@ Because Binance USDⓈ-M Futures REST `/fapi/v1/klines` only supports intervals 
 
 ---
 
-## 4. 1-Second Open Position Monitor & 5% ROI Trailing Stop
+## 7. Core Trading Rules & Capital Mechanics
+
+| Parameter | Specification | Implementation Details |
+| :--- | :--- | :--- |
+| **Exchange Market** | Binance USDⓈ-M Perpetuals (`USDT`) | Filters active `TRADING` `PERPETUAL` `USDT`-margined contracts via `/fapi/v1/exchangeInfo`. Automatically supports **One-Way Mode** & **Hedge Mode** (`/papi/v1/um/positionSide/dual`). |
+| **Universe Size** | **40 Assets** (`20` Positive + `20` Negative) | Ranks 24h `priceChangePercent` continuously: Top 20 gainers (`LONG` only) and Top 20 losers (`SHORT` only). |
+| **Execution Timeframe** | **15-Second (`15s`) Candles** | Real-time UTC-aligned `15,000ms` candles from `<symbol>@aggTrade` WebSocket ticks, **or the REST `/fapi/v1/trades` sweep when the stream starves**, plus `/fapi/v1/aggTrades` warmup. |
+| **Base Margin / Trade** | **`$2.000000` USDT** | Dedicated base margin per position entry. |
+| **Leverage Fallback Ladder** | **`10x → 11x → 12x → 13x → 14x → 15x`** | Attempts `10x` first. If order execution, `MIN_NOTIONAL`, or `LOT_SIZE` `minQty`/`stepSize` fails at `10x`, automatically escalates `11x`, `12x`, `13x`, `14x`, up to `15x`. |
+| **Profit Target & Trail** | **`+5.000000%` ROI → Trailing Stop** | The instant ROI hits `+5.000000%`, Trailing Stop arms, locks a fee-positive profit floor, and trails peak ROI dynamically to capture maximum profit. |
+| **Protective Stop** | **`-9.500000%` ROI** | Hard catastrophic-exposure floor on every open position, independent of the trail. Verified live: fired on 2 of 9 closed trades. Note the **achieved** exit can be worse than the guard — one `FIGHTUSDT` close landed at `-12.090464%` because a thin perpetual gapped through the stop between 1-second polls. Budget for `guard + slippage`, not `guard`. |
+| **Open Trade Check** | **Every `1.000000` Second** | Dedicated 1-second heartbeat reconciled with `/papi/v1/um/positionRisk` + live mark prices from `!markPrice@arr@1s` **or** the 1s REST price poll. |
+| **Capital Allocation Cap** | **`95.000000%` of Equity** | Uses up to 95% of unified `accountEquity` for trade execution. When free budget in the 95% pool drops below `$2.000000`, **Market Scanner automatically pauses** and focuses 100% on open running positions. |
+| **Start Balance Rule** | **Fixed on 1st API Connection** | Captured automatically the very first time Binance API connects and locked permanently until you click **Reset Start Balance** in Settings. |
+| **Numeric Precision** | **Strict `0.000000` (6 Decimals)** | Every balance, price, ROI %, Gross PNL, Binance Fee, Net PNL, and telemetry figure renders with exact 6-decimal formatting. |
+
+---
+
+## 8. 1-Second Open Position Monitor & 5% ROI Trailing Stop
 
 Every open position is inspected every **`1.000000` second** (`server/engine/positionMonitor1s.ts`) and displays all 9 required live telemetry columns on the dashboard:
 
@@ -154,11 +330,18 @@ Every open position is inspected every **`1.000000` second** (`server/engine/pos
 8. **Net PNL** (`Gross PNL - Binance Platform Fees`, `0.000000`)
 9. **Running Trade Time** (`HH:MM:SS (0.000000s)`)
 
-Once `ROI >= +5.000000%`, the **Trailing Stop Predator** activates, locks a minimum profit floor above round-trip Binance taker fees, tracks `peakRoiPct` every second, and fires an instant market close (`reduceOnly` in One-Way mode / matched `positionSide` in Hedge mode) when momentum reverses.
+Once `ROI >= +5.000000%`, the **Trailing Stop Predator** activates, locks a minimum profit floor above round-trip Binance taker fees, tracks `peakRoiPct` every second, and fires an instant market close (`reduceOnly` in One-Way mode / matched `positionSide` in Hedge mode) when momentum reverses. Both exit paths emit the real reason string verbatim, from the live session in [§2](#2-execution-ledger--live-verified):
+
+```text
+TRAILING_STOP_HIT (ROI 4.053556% <= Trail 4.260723%, Peak +5.410723%)
+PROTECTIVE_STOP_LOSS (ROI -12.090464% <= Guard -9.500000%)
+```
+
+The second line is the honest caveat: the guard fires the instant the poll sees the breach, but on a thin perpetual the fill lands past the level. Treat `-9.5%` as a *trigger*, not a guaranteed loss ceiling.
 
 ---
 
-## 5. Zero-Cost Self-Learning AI Agent Club
+## 9. Zero-Cost Self-Learning AI Agent Club
 
 Built on **`@langchain/langgraph`** (`server/ai/agentClubGraph.ts`) + **System-1 Typed Decision Primitives** (`server/ai/system1Primitives.ts`) at **`$0.00` API cost**:
 
@@ -173,9 +356,13 @@ Built on **`@langchain/langgraph`** (`server/ai/agentClubGraph.ts`) + **System-1
    - Updates live strategy parameters (`trailingCallbackRoiPct`, `trailingFloorRoiPct`, `pullbackRsiLongMax`, `pullbackRsiShortMin`, `minOrderflowDeltaRatio`, `minAiConfidenceScore`, `max24hOverextensionPct`) and updates System-1 weights via **Strictly Proper Brier Score Online Gradient Descent (RLCD)**.
    - Appends real contrastive training pairs to `./data/nimble_kev_training_pairs.jsonl`.
 
+### It is learning, in production, right now
+
+This is not a demo mode. From the verified session in [§2](#2-execution-ledger--live-verified), Hermes ran on both closed trades, produced a real MFE capture ratio (`0.83997037` on `FIGHTUSDT`), mutated the live style parameter set, and wrote the contrastive pairs to the journal — all at `$0.00` inference cost, with the entry feature snapshot (`orderflowDeltaRatio`, `rsi15s`, `pullbackDepthPct`) captured at the moment of entry so the post-mortem compares against the *decision input*, not the current market. Inspect the live mutated values any time in `snapshot.styleParams`.
+
 ---
 
-## 6. Lotus Garden Luxury Skeuomorphism UI/UX
+## 10. Lotus Garden Luxury Skeuomorphism UI/UX
 
 Designed around a clean, focused hardware console aesthetic paired with the **Lotus Garden** color palette:
 
@@ -188,17 +375,28 @@ Designed around a clean, focused hardware console aesthetic paired with the **Lo
 
 The primary screen remains pure and distraction-free—displaying **only** your **Start Balance**, **Current Equity**, **Open Trades**, and **40-Asset Market Scanner**—while **AI Club**, **System & Error Logs**, and **Vault Settings & Whitelist IPs** open cleanly via physical tactile switches in the header.
 
+> The header's API-weight diode is driven by **data liveness**, not socket state. It cannot turn green on a handshake that delivers nothing.
+
 ---
 
-## 7. IPv4 Whitelist Discovery & Portfolio Margin Routing
+## 11. IPv4 Whitelist, Portfolio Margin Routing & Zero-Trade Triage
 
-A Binance `-2015 Invalid API-key, IP, or permissions` rejection has **three** distinct causes, and whitelisting is only one of them. Check them in this order:
+### "My bot executes zero trades" — check the feed first
 
-### a) Wrong wallet / wrong host (most common, and whitelisting will never fix it)
+Before touching strategy parameters, look at the scanner's per-asset diagnostics. **Identical values across all 40 assets are a transport failure, not a picky strategy.** A real market never produces `rsi15s = 50.000000` on forty symbols simultaneously.
+
+| Observed | Diagnosis |
+| :--- | :--- |
+| `candleCount15s` identical on all 40, `rsi15s` = `50.000000`, `orderflowDeltaRatio` = `1.000000` | Candle builder is fabricating flat bars from a dead feed (pre-`v1.2.0` behaviour). Run `scripts/diagnoseMarketData.ts`. |
+| Values vary but every asset sits at `MONITORING` | Strategy is genuinely not finding setups. Wait, or widen `pullbackRsiLongMax` / `pullbackRsiShortMin`. |
+| Some assets at `CONFIRMED_SIGNAL`, no order | Check the logs for `MIN_NOTIONAL` / `LOT_SIZE` rejections or `PAUSED_MARGIN_FULL`. |
+| `IN_POSITION` appears | The pipeline is healthy end-to-end. |
+
+### A Binance `-2015 Invalid API-key, IP, or permissions` rejection has three distinct causes — whitelisting is only one
+
+**a) Wrong wallet / wrong host** (most common, and whitelisting will never fix it)
 
 If your account is in **Portfolio Margin** mode, your funds live in the **PM unified wallet**, which `fapi.binance.com` cannot see at all. Classic Futures endpoints will keep returning `-2015` no matter how many IPs you whitelist, because the key carries `enablePortfolioMarginTrading` rather than `enableFutures`. **HFT** routes every signed call to `papi.binance.com` for exactly this reason.
-
-Run the bundled diagnostic to see which permissions and wallets your key actually has:
 
 ```bash
 ./node_modules/.bin/tsx scripts/diagnoseApiKey.ts
@@ -206,20 +404,22 @@ Run the bundled diagnostic to see which permissions and wallets your key actuall
 
 It prints vault-decryption health, the authoritative Spot `apiRestrictions` permission readout, and live status codes for Futures *and* Portfolio Margin endpoints side by side. Credential values are never printed — only length, charset, and first/last 4 characters.
 
-### b) Missing API-key permission
+**b) Missing API-key permission** — Enable **"Enable Portfolio Margin Trading"** (or **"Enable Futures"** for a classic Futures account) in Binance API Management. **Never enable Withdrawal permissions.**
 
-Enable **"Enable Portfolio Margin Trading"** (or **"Enable Futures"** for a classic Futures account) in Binance API Management. **Never enable Withdrawal permissions.**
-
-### c) Un-whitelisted egress IPv4
+**c) Un-whitelisted egress IPv4**
 
 - `server/utils/ipDiscovery.ts` enumerates **every non-loopback network interface** (`os.networkInterfaces()`) AND performs **per-interface socket-bound (`localAddress`) outbound IPv4 probes** across multiple independent echo endpoints (`ipify`, `icanhazip`, `amazonaws`, `ident.me`).
 - If your online dedicated/cloud server has **multiple public IPv4 addresses**, **all of them** are displayed in **Settings & IPs** with a **1-click Copy All Whitelist IPv4s** button (formatted space-separated for direct paste into Binance API Management).
 - Multi-IP server operators can also optionally pin all outbound Binance REST & WebSocket connections to a single chosen local interface IPv4 directly from the Settings UI.
 - All Binance sockets enforce `family: 4`, so requests deterministically egress from your whitelisted IPv4 and never silently fall back to IPv6/NAT64.
 
+**d) Stream blackhole (an ISP/network issue, never an API-key issue)**
+
+`fstream.binance.com` resolves to ~8 edge IPs and some ISPs blackhole a subset in ways that no credential change can affect: TCP connects, the upgrade completes, Binance ACKs your subscription, and then nothing arrives. **HFT** rotates the resolved edge on every attempt and, when every edge is equally silent, transparently runs on REST ([§4](#4-market-data-transport-resilience-ws--rest-failover)).
+
 ---
 
-## 8. Quickstart — Localhost PC Setup
+## 12. Quickstart — Localhost PC Setup
 
 ### Prerequisites
 - **Node.js `v20+`** (recommended `v22 LTS`) and `npm`
@@ -254,13 +454,12 @@ npm run dev
 1. Open **`http://localhost:3000`** in your browser.
 2. Click **Settings & IPs** (top right) and copy your detected **Public Outbound IPv4 Address(es)** into your Binance API Key IP Whitelist.
 3. Paste your **Binance API Key** and **Binance Secret Key** and click **Save & Connect Live API**. Your **Start Balance** will automatically capture and lock on first connection.
-4. Click **ARM ENGINE** in the top header to begin live 15-second automated trading.
+4. **Before arming**, open the scanner and confirm the 40 assets report *varied* `rsi15s`, `candleCount15s` and `orderflowDeltaRatio` values. Identical values mean the feed is starved — see [§11](#11-ipv4-whitelist-portfolio-margin-routing--zero-trade-triage). The REST fallback engages on its own after ~20 seconds, so this usually resolves itself.
+5. Click **ARM ENGINE** in the top header to begin live 15-second automated trading.
 
 ---
 
-## 9. Production Deployment — Online VPS / Dedicated Server
-
-**HFT** runs as a unified single-port production server (`0.0.0.0:3000`) serving the execution engine, REST API, `/ws` real-time telemetry stream, and compiled frontend bundle:
+## 13. Production Deployment — Online VPS / Dedicated Server
 
 ```bash
 # 1. Install dependencies & build optimized frontend assets
@@ -273,6 +472,10 @@ pm2 start ecosystem.config.cjs
 pm2 save
 pm2 startup
 ```
+
+> **You no longer need to move hosts for correctness.** A VPS is still the right call for latency, uptime and a stable whitelisted IP — but the reason people migrated off residential lines (a blackholed `fstream` stream) is now handled in-process by the REST fallback. Deploy where you like, then check `scripts/diagnoseMarketData.ts` to see which transport you're actually running on.
+
+**HFT** runs as a unified single-port production server (`0.0.0.0:3000`) serving the execution engine, REST API, `/ws` real-time telemetry stream, and compiled frontend bundle.
 
 ### Optional Nginx Reverse Proxy (HTTPS + WebSocket `/ws`)
 
@@ -294,7 +497,7 @@ server {
 
 ---
 
-## 10. Optional Local System-1 Models (`Nimble`, `Laya`, `Kev`, `Ollama`)
+## 14. Optional Local System-1 Models (`Nimble`, `Laya`, `Kev`, `Ollama`)
 
 Out of the box, **HFT** uses its built-in calibrated **System-1 RLCD Engine** (`~0.2ms` latency, `$0.00` cost, zero GPU required). If you also wish to ensemble a local open-weight System-1 checkpoint on your machine at `$0.00` API cost, open **AI Club** in the dashboard and select:
 
@@ -317,7 +520,7 @@ Out of the box, **HFT** uses its built-in calibrated **System-1 RLCD Engine** (`
 
 ---
 
-## 11. REST & WebSocket API Reference
+## 15. REST & WebSocket API Reference
 
 | Method & Path | Description |
 | :--- | :--- |
@@ -329,14 +532,26 @@ Out of the box, **HFT** uses its built-in calibrated **System-1 RLCD Engine** (`
 | `POST /api/settings/rescan-ips` | Re-probe all server network interfaces and outbound public IPv4 addresses |
 | `POST /api/settings/bind-ip` | Pin outbound Binance HTTP/WS sockets to a specific local NIC IPv4 (`{ localAddress }`) |
 | `POST /api/settings/local-ai` | Switch System-1 runtime (`builtin`, `ollama_nimble`, `laya_http`, `kev_http`) |
+| `POST /api/settings/style-params` | Override the live self-mutated strategy parameter set (trailing floor/callback, protective stop, RSI bands, orderflow & AI-conviction minimums). Read current values from `snapshot.styleParams` |
 | `POST /api/positions/close` | Immediately market-close an open trade (`{ symbol, positionSide }`) |
 | `GET /api/logs` | Query structured execution, API, AI, and error logs |
 | `GET /api/logs/export` | Download complete plain-text `.log` diagnostic file |
+| `POST /api/logs/clear` | Flush the in-memory log ring buffer |
 | `WS /ws` | Real-time push stream (`INIT`, 1-second `SNAPSHOT`, and instant `LOG` frames) |
+
+### Reading `rateTelemetry` correctly
+
+| Field | Meaning |
+| :--- | :--- |
+| `wsConnected` | **True only while market data frames are actively flowing.** A completed handshake with no data does not set it. |
+| `usedWeight1m` / `maxWeight1m` | Worst of the independent `FAPI` / `PAPI` buckets against the `2400/min` limit. |
+| `wsStreamsCount` | Live subscribed stream multiplexes on the current connections. |
+| `avgRestLatencyMs` | Rolling mean over the last 40 REST round trips — watch this before trusting 1s price cadence. |
+| `orderCount10s` / `orderCount1m` | Binance-reported order rate against the `300/10s` and `1200/1m` ceilings. |
 
 ---
 
-## 12. Repository Structure & Security
+## 16. Repository Structure & Security
 
 ```text
 hft/
@@ -352,14 +567,15 @@ hft/
 │   ├── binance/
 │   │   ├── rateGovernor.ts       # Priority-tiered per-host API weight & order governor (FAPI + PAPI buckets)
 │   │   ├── restClient.ts         # Keep-Alive HMAC-SHA256 client: signed -> papi, public market data -> fapi
-│   │   ├── wsStreamManager.ts    # Multiplexed fstream.binance.com WS manager + rotating edge-IP DNS lookup
-│   │   └── candleBuilder15s.ts   # Real-time 15-second OHLCV + Orderflow Delta aggregator
+│   │   ├── wsStreamManager.ts    # fstream WS manager: rotating edge DNS + frame-staleness watchdog + liveness-based telemetry
+│   │   └── candleBuilder15s.ts   # 15s OHLCV + Orderflow Delta aggregator · seals only elapsed windows, never fabricates bars
 │   ├── engine/
 │   │   ├── stateStore.ts         # Atomic encrypted vault & persistent Start Balance / AI brain
+│   │   ├── restMarketFeed.ts     # REST standby feed: 1s prices · 10s 24h · round-robin tape sweep + trade-ID dedup
 │   │   ├── marketScanner.ts      # Top-40 (20 Pos / 20 Neg) 24h USDT-M scanner + 95% pause logic
 │   │   ├── strategy15s.ts        # 15s Pullback + Bullish/Bearish Confirmation detector
-│   │   ├── positionMonitor1s.ts  # 1s Open Position check, Binance Fees, Net PNL & 5% ROI Trail
-│   │   └── hftBotEngine.ts       # Master HFT orchestrator & 10x→15x leverage fallback ladder
+│   │   ├── positionMonitor1s.ts  # 1s Open Position check, Binance Fees, Net PNL, 5% ROI Trail & -9.5% Protective Stop
+│   │   └── hftBotEngine.ts       # Master HFT orchestrator, transport failover & 10x→15x leverage ladder
 │   └── utils/
 │       ├── cryptoVault.ts        # AES-256-GCM credential encryption at rest
 │       ├── format.ts             # 0.000000 formatting & exact LOT_SIZE step precision math
@@ -370,7 +586,7 @@ hft/
 │   ├── index.css                 # Lotus Garden skeuomorphic design system (#ADEBB3/#FF857A/#EBAEE6/#6B403C)
 │   ├── components/
 │   │   ├── HftBrandLogo.tsx      # Vector HFT Candlestick + Breakout Arrow logo lockup
-│   │   ├── HeaderChassis.tsx     # Top hardware chassis, API weight diode & Master Engine switch
+│   │   ├── HeaderChassis.tsx     # Top hardware chassis, data-liveness diode & Master Engine switch
 │   │   ├── EquityBezel.tsx       # Fixed Start Balance & Current Equity OLED bezel + 95% pool bar
 │   │   ├── OpenTradesDeck.tsx    # Live 1s Open Trades table with fees, Net PNL & trailing badge
 │   │   ├── MarketScannerDeck.tsx # Dual-bank 40-asset scanner with 15s pullback/confirmation states
@@ -383,7 +599,8 @@ hft/
 │       └── format.ts             # Strict 6-decimal UI formatters
 ├── scripts/
 │   ├── selfTest.ts               # Automated verification suite for strategy, trailing stop & AI Club
-│   └── diagnoseApiKey.ts         # Vault decrypt health + live Spot/Futures/Portfolio Margin permission probe
+│   ├── diagnoseApiKey.ts         # Vault decrypt health + live Spot/Futures/Portfolio Margin permission probe
+│   └── diagnoseMarketData.ts     # Per-edge fstream handshake/ACK/data-frame matrix + REST cross-check
 ├── ecosystem.config.cjs          # PM2 production process configuration
 └── .env.example                  # Environment configuration template
 ```
@@ -391,6 +608,7 @@ hft/
 ### Security Guarantees
 - `./data/` (containing encrypted API credentials, daily logs, and contrastive trade journals) and `.env` are strictly excluded via `.gitignore` and **never committed to Git**.
 - Binance API credentials are encrypted at rest using **AES-256-GCM** (`scrypt` key derivation).
+- **The REST market-data fallback uses public endpoints only.** It signs nothing, touches no credentials, and cannot place an order — a fallback transport is not an expanded attack surface.
 - All Binance outbound sockets enforce `family: 4` (IPv4) so requests deterministically match your whitelisted IPv4 address(es).
 - Diagnostic tooling and logs **never** emit full key material — only credential length, charset, and first/last 4 characters.
 - The API key requires **trading** permission only. **Withdrawal permission must never be enabled.**

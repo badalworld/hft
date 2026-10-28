@@ -438,6 +438,36 @@ export class BinanceFuturesRestClient {
     });
   }
 
+  public async getAllSymbolPrices(): Promise<Array<{ symbol: string; price: string }>> {
+    return this.rawRequest({
+      method: 'GET',
+      path: '/fapi/v1/ticker/price',
+      priority: 'P3_BACKGROUND_SCAN',
+      weight: 2,
+    });
+  }
+
+  public async getRecentTrades(
+    symbol: string,
+    limit = 1000
+  ): Promise<
+    Array<{
+      id: number;
+      price: string;
+      qty: string;
+      time: number;
+      isBuyerMaker: boolean;
+    }>
+  > {
+    return this.rawRequest({
+      method: 'GET',
+      path: '/fapi/v1/trades',
+      params: { symbol, limit },
+      priority: 'P3_BACKGROUND_SCAN',
+      weight: 5,
+    });
+  }
+
   public async getDualPositionMode(): Promise<boolean> {
     const res = await this.rawRequest<{ dualSidePosition: boolean }>({
       method: 'GET',
