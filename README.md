@@ -3,7 +3,7 @@
 
   <br />
 
-  [![Version](https://img.shields.io/badge/Version-1.5.0-6B403C?style=for-the-badge)](#whats-new-in-v150)
+  [![Version](https://img.shields.io/badge/Version-1.6.0-6B403C?style=for-the-badge)](#whats-new-in-v160)
   [![Exchange](https://img.shields.io/badge/Exchange-Binance%20Portfolio%20Margin%20(UM)-F0B90B?style=for-the-badge)](https://www.binance.com/en/futures)
   [![Execution](https://img.shields.io/badge/Execution-15s%20Candles%20%7C%201s%20Monitor-ADEBB3?style=for-the-badge)](#6-real-time-15-second-candle-engine--pullback-strategy)
   [![Transport](https://img.shields.io/badge/Transport-WebSocket%20%2B%20Auto%20REST%20Failover-8FD6FF?style=for-the-badge)](#4-market-data-transport-resilience-ws--rest-failover)
@@ -25,7 +25,86 @@
 
 ---
 
-## What's New in `v1.5.0`
+## What's New in `v1.6.0`
+
+**A 15-second candle records the result of the auction, never the fight that produced it.** It cannot say whether buyers were lifting offers or sellers were hitting bids, whether the move was accelerating or already exhausted, or whether a wall was quietly absorbing everything thrown at it. `v1.6.0` adds that missing layer: a live order-flow gate built from the top-20 depth book (`@depth20@500ms`) and the executed tape, scoring every `15s` trigger against six checks — fee-plus-spread cost, order-book imbalance, cumulative volume delta level and slope, aggressive buy/sell ratio, price location in its own range, and absorption.
+
+**It ships in `shadow` mode on purpose.** The thresholds below are the starting hypotheses, not a proven edge; the system has no right to refuse real orders on an untested hypothesis. In `shadow` every verdict is scored, counted and written to the tape as `WOULD-ENTER` / `WOULD-BLOCK`, and nothing is blocked. Flipping the vault setting to `enforce` turns the same verdicts into a hard veto with a `20s` symbol cooldown. The mode is operator-only — the council may tune the thresholds, but it cannot vote itself into blocking trades. The full arithmetic and gate order live in [§6](#6-real-time-15-second-candle-engine--pullback-strategy).
+
+The same release replaces the hand-drawn segment glyphs with **DSEG7 Classic Bold**, a self-hosted SIL-OFL seven-segment typeface ([§10](#10-lotus-garden-luxury-skeuomorphism-uiux)), and re-verifies the AI Club against the live book instead of describing it from memory.
+
+### The three indicators, as arithmetic
+
+| Quantity | Definition | What the gate demands |
+| :--- | :--- | :--- |
+| **Order Book Imbalance** | Top-20 levels, distance-weighted `w_i = 1 / (1 + 0.2i)`, quantity-weighted: `OBI = (Σ w·q_bid − Σ w·q_ask) / (Σ w·q_bid + Σ w·q_ask)` | `≥ +0.20` for `LONG`, `≤ −0.20` for `SHORT` (`orderFlowMinObi`, bounded `0.05–0.6`). A book inside the band is neutral, not weak. |
+| **Cumulative Volume Delta** | Quote-denominated, per `1s` bucket: `CVD_t = Σ (buyUsd_i − sellUsd_i)` over the rolling window. Binance's `m` flag is the aggressor: `m=false` is a market **buyer**, `m=true` is a market **seller**. | `CVD > 0` **and** rising for `LONG`; `CVD < 0` **and** falling for `SHORT`. Slope is measured as the window's second half minus its first half, so a positive but fading delta is refused — that is the exhaustion print this layer exists to catch. |
+| **Trade Aggression** | `buyUsd / sellUsd` across the same window; `buyAggressionMultiple` compares this window's buy notional against the previous window's. | Ratio `≥ 1.50` for `LONG`; the reciprocal is tested for `SHORT`, so `0.67` is the mirrored `1.50` (`orderFlowMinVolumeRatio`, bounded `1.05–3`). |
+| **Liquidity & Absorption** | Aggression compared against its own baseline, price progress over the same window, and the refill ratio of the touch: current touch depth ÷ its own EMA. | Refuses when aggression `≥ 1.60×`, price progress `≤ 0.05%`, **and** the resting touch refilled `≥ 1.05×` its baseline. Heavy flow that cannot move price means the other side is eating it — `ABSORBED_BUYERS` / `ABSORBED_SELLERS`. |
+| **Price location** | Position of the last trade inside the window's own high–low range. | `LONG` needs the upper half, `SHORT` the lower half. This is the "reclaims a key level" leg rather than the "breaks a new high" leg: a pullback trigger and a fresh extreme cannot both be true on the same bar. |
+| **Spread-inclusive cost** | `costRoiPct = (2 × takerRate × leverage × 100) + (spreadBps / 10,000 × leverage × 100)`. | `expectedRoiPct` must clear `costRoiPct × minFeeHurdleMultiple`. Both terms are linear in leverage, so the ratio is leverage-invariant — no rung of the ladder makes a small move affordable. |
+
+### Six gates, in the order a desk checks them
+
+The strategy class (`server/engine/orderFlowStrategy.ts`) is pure and deterministic. Two data preconditions run before the six: a missing or `>5s`-old depth snapshot returns **`NO_DATA`**, and a tape window with fewer than `5` active seconds returns **`NO_SIGNAL`**. Guessing is never an option; an empty feed is reported as empty.
+
+| # | Gate | Verdict on failure |
+| :--- | :--- | :--- |
+| 1 | Fee-plus-spread cost vs expected move | `EXECUTION_REJECT` |
+| 2 | Order-book imbalance | `OBI_REJECT` |
+| 3 | CVD level **and** slope | `CVD_REJECT` |
+| 4 | Aggressive buy/sell ratio (reciprocal on `SHORT`) | `RATIO_REJECT` |
+| 5 | Price location in the window's range | `PRICE_REJECT` |
+| 6 | Absorption against the resting side | `ABSORPTION_REJECT` |
+
+### Shadow first, because these are hypotheses
+
+| | `shadow` (default) | `enforce` |
+| :--- | :--- | :--- |
+| Entry behaviour | unchanged; the `15s` trigger still decides | a non-confirming verdict vetoes the entry |
+| What is recorded | verdict counted in `snapshot.orderFlow.byVerdict`, one log line per symbol+verdict per minute | same, plus `⛔ blocked by order flow` and a `20s` cooldown |
+| Log prefix | `SHADOW … would-enter` / `would-block` | `ORDER_FLOW …` |
+| Who can change it | operator only — `POST /api/settings/order-flow-mode` or the AI Club toggle | same |
+
+The mode persists in the encrypted vault and defaults to `shadow` on any unrecognised value. The council owns four thresholds — `orderFlowMinObi`, `orderFlowMinVolumeRatio`, `orderFlowWindowSec`, `orderFlowAbsorptionMultiple` — each with a per-parameter step cap, and the absorption multiple is deliberately marked **inverted**: a larger multiple means fewer absorption blocks, which is a loosening, and the council scores it as one. `ADVERSE_TAKER_FLOW` is the one autopsy cause allowed to move the OBI and ratio levers, because that is the evidence those levers encode.
+
+### Where the layer is visible
+
+- **Scanner → `Book / 60s Tape` column** — `OBI`, `CVD`, aggressor ratio and spread in basis points per asset, plus a flow badge on every row (`CONFIRM`, `THIN TAPE`, `NO BOOK`, `OBI ✕`, `CVD ✕`, `RATIO ✕`, `RANGE ✕`, `COST ✕`, `ABSORBED`).
+- **AI Club → Order Flow Layer panel** — depth/tape liveness, live books vs watched symbols, would-enter/would-block counters, refusals by gate since boot, current thresholds, and the `shadow`/`enforce` switch.
+- **Execution log** — `ORDER_FLOW` lines, rate-limited to one per symbol+verdict per minute so a persistent refusal cannot flood the tape.
+- **`snapshot.orderFlow`** — the same telemetry as machine-readable state (`mode`, `confirmed`, `blocked`, `byVerdict`, `liveBooks`, `watchedSymbols`, `depthLive`, `tapeLive`).
+
+The depth socket has its own `12s` data-staleness watchdog and edge rotation, independent of the market and aggTrade sockets; the tape rides the aggTrade stream the candle builder already consumes, so the layer adds exactly one subscription. When either feed dies, the verdict is `NO_DATA` — the gate never invents a book.
+
+### The readout is finally a real LED face
+
+The drawn-segment readout was faithful to the idea of a seven-segment display but not to its geometry: at `22px` the chamfered polygons and `1px` joints blurred into bars. `src/components/SevenSegmentNumber.tsx` now sets every digit in **DSEG7 Classic Bold**, the SIL-OFL typeface designed for exactly this, self-hosted at `public/fonts/DSEG7Classic-Bold.woff2` with its licence beside it and preloaded from `index.html` so the panel never flashes fallback numerals. One em of type is one digit row; columns are `0.72em`, ink height is exactly `1em`, and the odometer, shortest-path roll, unlit `8` ghost, spring, bloom and reduced-motion behaviour are unchanged. Details and measurements in [§10](#10-lotus-garden-luxury-skeuomorphism-uiux).
+
+### The AI Club was verified against the live book, not described from memory
+
+The live account snapshot at `2026-10-29T00:12Z` — engine armed, zero open positions — carries **`109` settled closes: `65` wins, `44` losses, `59.633028%`**. Gross is `-$0.386237`, Binance fees are `$2.185561`, funding is `$0.096482`, and net is `-$2.571798`: the fee bill remains the difference between roughly break-even and a losing book, which is why the cost gate runs first.
+
+The club's own record in that snapshot:
+
+| Evidence | Live value |
+| :--- | :--- |
+| Post-mortems on settled closes | `109 / 109` — every close, win or loss |
+| Council ballots | **`73` cast across `109` closes: `36` approved, `37` rejected** — `33` of them in the most recent `40` closes (`9` approved / `24` rejected) |
+| Style mutations persisted in the vault | `62`, each with parameter, before, after and the trade that justified it |
+| Shared-memory lessons / bands | `70` lessons across `9` setup bands |
+| Contrastive training pairs | `109` (`./data/nimble_kev_training_pairs.jsonl`) |
+
+The refusals are the interesting half. On `BLESSUSDT` every seat voted `FOR` a tightening — `minAiConfidenceScore 0.661000 → 0.676000`, approved `3/3`. On `TAGUSDT` the same parameter was proposed the other way — `0.676000 → 0.668000` — and the panel voted `1/3`: *"Refusing to loosen my own guard (minAiConfidenceScore 0.676000 → 0.668000) — history says otherwise (48.148148% win over 27, $-1.454204 net)."* `trailingFloorRoiPct` was raised twice on fee-drag evidence, `3.890000 → 4.010000 → 4.130000`. A profitable close still does not get to relax the system.
+
+One honest artefact: those two trailing-floor ballots show **two votes, not three**, because the process serving this account predates the three-seat fix from `v1.5.0` (Hermes owned the parameter and also occupied a seat, collapsing the panel). The code in this repository seats three independent agents, and the self-test now pins that property for all three trailing parameters. It takes effect on the next backend restart.
+
+> **Verification status, stated separately.** `tsc` is clean, `vite build` succeeds, and the self-test suite passes all **11 groups**, including the new order-flow group: quote-denominated CVD and slope from real bucket math, distance-weighted OBI symmetry on mirrored books, touch-refill ratios, all nine verdicts (`NO_DATA` on a missing and a stale book, `NO_SIGNAL` on a thin tape, `EXECUTION_REJECT` on cost, `OBI_REJECT`, `CVD_REJECT`, `RATIO_REJECT`, `PRICE_REJECT`, `ABSORPTION_REJECT` on both sides), `shadow` as the default and `enforce` surviving a store reload, plus council approval of a one-step OBI tightening, refusal of an over-step, and the inverted absorption polarity. The readout was driven in a browser against the live account, served by the running backend itself on port `3000` (the HTML carries `/@vite/client`, so the current frontend source is already what the browser receives): the font loaded (`document.fonts.check('700 22px "DSEG7 Classic"') === true`), both readouts measured `79 × 22px` at a `600px` viewport with the correct `aria-label`s, and the AI Club opened with the ballot record above. That check also caught a real rollout bug — the new scanner read `undefined.toFixed()` from the old backend's missing fields and blanked the page — which is fixed by type guards that render `—`. **The backend has not been restarted**, so the depth subscription and the order-flow gate are not yet executing live; the DSEG7 panel, by contrast, is already live, because `npm run dev` serves the client through Vite's dev middleware rather than from a stale bundle. The book is flat, so the restart is safe whenever you choose to take it. The CodeRabbit CLI is not installed on this machine; the audit was performed with reviewer agents plus static verification and line-by-line reads. Nothing has been pushed.
+
+<details>
+<summary><b>What's New in <code>v1.5.0</code> — the arithmetic fix, the audit, and a dashboard that cannot lie about liveness</b></summary>
+
+<br />
 
 **This release is the audit of a book that keeps losing, and it goes after the arithmetic rather than the aesthetics.** `109` settled closes on this account read `59.633028%` win rate against a `-$2.571798` net — and the gross figure underneath it is only `-$0.386237`. **The strategy is roughly break-even before fees and `2.185561` USDT of Binance commission is what actually empties the till.** The average winner nets `+$0.090161` while the average loser costs `-$0.191643`, a `2.13:1` asymmetry that needs a `67.94%` win rate to break even. Nothing in the entry logic can close that gap; only an exit that keeps more of what it earns and an entry that refuses moves too small to pay for themselves can. That is what this release builds.
 
@@ -68,7 +147,7 @@ The feed was not one bug, it was five, and the visible symptom — a screen that
 
 > **Verification status, stated separately.** `npm run typecheck` is clean, `vite build` succeeds (`481.75 kB` bundle), and `npm test` passes all **10 groups** — the two new ones covering exactly the work above: the ledger version bumps on a settled trade and an income update but *not* on a credential write, `lightenSnapshot` removes all five heavy keys and keeps `timestamp`/`ledgerVersion`, every style-guard bound and relationship rule, every `isValidIpv4` case, and all eight refused decision endpoints each returning a non-empty reason. The odometer, the four hardened dialogs, the feed badge and the settings refusals were driven in the browser against the live account. **How the audit was run, stated honestly:** the CodeRabbit CLI is not installed on this machine, so the full-codebase audit was performed with reviewer agents plus static verification (`tsc`, `vite build`, the self-test suite, and line-by-line reads of every money path) rather than that tool. **What has not been done: the running backend has not been restarted.** Positions were open, so the new server code — the exchange-side stop, the ladder resolution, the version-gated stream — is not yet executing on this account. It goes live on the next restart, and the restart should happen when the book is flat.
 
-
+</details>
 
 <details>
 <summary><b>What's New in <code>v1.4.0</code> — drawn LED console, typed loss autopsy, operator briefing</b></summary>
@@ -194,7 +273,7 @@ Every claim below was observed on a live, armed, real-money session — not asse
 | **Strategy logic is genuinely varied, not degenerate** | Across the 40-asset scanner, sampled three times consecutively and stable: `rsi15s` → **39 distinct values**, `pullbackDepthPct` → 40, `orderflowDeltaRatio` → 37, `candleCount15s` → 29, and **zero** assets pinned at the degenerate `50.000000`. Stages observed: `COOLDOWN`, `MONITORING`, `PULLBACK_DETECTED`, `CONFIRMED_SIGNAL`, `IN_POSITION`. |
 | **Self-heals a blocked WebSocket** | REST feed engaged with no operator action and restored candle diversity from the flat `79 / 50.000000 / 0 / 1.000000` dead state. Still running in fallback as of `2026-10-28T22:30:48Z` — `wsConnected: false`, weight `765 / 2,400`, mean REST round trip `315 ms` — and the strategy is still producing varied, actionable diagnostics on all 40 assets. |
 | **AI Club genuinely learns** | Across the first run: 39 consecutive post-mortems, 37 persisted style mutations, each recording the parameter and its value before and after. `minAiConfidenceScore` walked `0.560 → 0.552 → 0.544 → 0.536 → 0.551 → 0.566`, and after two premature-entry losses Hermes tightened three gates at once — `minOrderflowDeltaRatio 1.180 → 1.220`, `pullbackRsiShortMin 48 → 49`, `minAiConfidenceScore 0.536 → 0.551` — then raised `trailingFloorRoiPct 3.650 → 3.770` in response to the fee-drag breakeven. The full ledger of what the loop has produced since is in [§9](#9-zero-cost-self-learning-ai-agent-club). |
-| **Type-safe & verified** | `npm run typecheck` → exit 0. `vite build` → exit 0. All **10** self-test groups → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
+| **Type-safe & verified** | `npm run typecheck` → exit 0. `vite build` → exit 0. All **11** self-test groups → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
 
 ---
 
@@ -375,11 +454,11 @@ flowchart TB
     subgraph Binance["Binance Production Hosts"]
         PAPI["HTTPS REST (Signed)\npapi.binance.com\n(/papi/v1/account, /papi/v1/um/*)"]
         FAPI["HTTPS REST (Public Market Data)\nfapi.binance.com\n(time, exchangeInfo, ticker/24hr, trades, aggTrades)"]
-        FSTREAM["Multiplexed WebSockets\nfstream.binance.com\n(!ticker@arr, !markPrice@arr@1s, aggTrade, /pm/ws listenKey)"]
+        FSTREAM["Multiplexed WebSockets\nfstream.binance.com\n(!ticker@arr, !markPrice@arr@1s, aggTrade, depth20@500ms, /pm/ws listenKey)"]
     end
 
     subgraph Feed["Transport Selection Layer"]
-        WD["Frame-Staleness Watchdog\n(15s market / 25s tape · terminate + rotate edge)"]
+        WD["Frame-Staleness Watchdog\n(15s market / 25s tape / 12s depth · terminate + rotate edge)"]
         RMF["RestMarketFeed (standby)\n1s prices · 10s 24h · 15s round-robin tape sweep\n+ trade-ID watermark dedup"]
     end
 
@@ -388,6 +467,7 @@ flowchart TB
         CB15["15-Second Candle Builder\n(UTC-Aligned OHLCV + Buyer/Seller Delta · never fabricates a bar)"]
         SCAN40["Top-40 24h Market Scanner\n(20 Max Positive + 20 Max Negative)"]
         STRAT["15s Pullback + Confirmation Detector"]
+        FLOW["Order Flow Layer\n(60s CVD · weighted OBI · aggressor ratio\nprice location · absorption · shadow-first)"]
         LADDER["$2.000000 Margin Executor\n(10x → 11x → 12x → 13x → 14x → 15x)"]
         MON1S["1.000000s Position Monitor\n(+5% ROI Trail · -6% Protective Stop\n+ exchange-side STOP_MARKET)"]
         VAULT["AES-256-GCM Local Vault\n(Fixed Start Balance + API Keys + AI Brain)"]
@@ -413,7 +493,8 @@ flowchart TB
     FAPI <--> RMF
     SCAN40 --> STRAT
     CB15 --> STRAT
-    STRAT --> AG1 --> AG2 --> AG3 --> AG4 --> LADDER
+    FSTREAM -->|aggTrade + depth20| FLOW
+    STRAT --> FLOW --> AG1 --> AG2 --> AG3 --> AG4 --> LADDER
     LADDER --> GOV
     MON1S --> GOV
     MON1S -->|Trade Closed| AG5
@@ -442,6 +523,21 @@ Because Binance USDⓈ-M Futures REST `/fapi/v1/klines` only supports intervals 
    - Waits for a **15-second relief bounce** off local low (`RSI(7)` rising into bounce zone / green retracement bar testing `EMA(9)` while capped by `EMA(21)` resistance).
    - Executes **Market SHORT** immediately upon a **15s bearish confirmation candle** (bearish breakdown body or upper-wick shooting-star rejection + aggressive `aggTrade` seller delta confirmation).
 
+### Order-flow confirmation (rolling `orderFlowWindowSec`, default `60s`)
+
+The confirmation bar decides **when** a setup exists; the order-flow layer decides **whether the executed tape agrees**. It runs on every trigger that clears the fee hurdle, before the AI Club is asked to vote, and reads a rolling window rather than the trigger bar — from the `aggTrade` stream the candle builder already consumes plus one new subscription, `@depth20@500ms` for the top-20 book.
+
+- **Order Book Imbalance** — distance-weighted top-20 depth, `w_i = 1 / (1 + 0.2i)`, quantity-weighted across bids and asks: `OBI = (bidW − askW) / (bidW + askW)`. `LONG` needs `≥ +0.20`, `SHORT` needs `≤ −0.20` (`orderFlowMinObi`, bounded `0.05–0.6`).
+- **Cumulative Volume Delta** — quote-denominated, `CVD = Σ(buyUsd − sellUsd)` over the window; `m=false` is a market buy, `m=true` a market sell. The level **and** the slope must agree: a positive but fading delta is the exhaustion this layer refuses. `orderFlowWindowSec` defaults to `60`.
+- **Trade aggression** — `buyUsd / sellUsd` across the same window; `≥ 1.50` for `LONG`, and `SHORT` tests the reciprocal, so `0.67` is the mirrored `1.50` (`orderFlowMinVolumeRatio`, bounded `1.05–3`). Aggression multiple compares the window against the previous one.
+- **Liquidity & absorption** — heavy aggression that cannot move price means the other side is eating it. Refused when the aggressive side prints `≥ 1.60×` its previous window, price advances `≤ 0.05%`, and the resting touch refills to `≥ 1.05×` its own EMA (`orderFlowAbsorptionMultiple`, bounded `1.1–4`). Reported as `ABSORBED_BUYERS` / `ABSORBED_SELLERS`.
+- **Price location** — the last trade must sit in the upper half of the window's range for `LONG`, the lower half for `SHORT`. That is the "reclaims a key level" leg; a pullback trigger and a fresh extreme cannot both be true.
+- **Cost** — the spread is paid on top of taker fees, so both enter one ratio: `costRoiPct = 2 × takerRate × leverage × 100 + spreadBps / 10,000 × leverage × 100`, and `expectedRoiPct` must clear `costRoiPct × minFeeHurdleMultiple`. Leverage cancels, so a higher rung never makes a small move affordable.
+
+Two data preconditions run first: a missing or `>5s`-old depth snapshot is **`NO_DATA`**, and fewer than `5` active tape seconds is **`NO_SIGNAL`**. The six gates then run in desk order — cost (`EXECUTION_REJECT`), OBI (`OBI_REJECT`), CVD level+slope (`CVD_REJECT`), aggressor ratio (`RATIO_REJECT`), price location (`PRICE_REJECT`), absorption (`ABSORPTION_REJECT`) — and only a clean pass returns `CONFIRM`.
+
+**The gate ships in `shadow` mode.** Every verdict is counted and logged as `SHADOW … would-enter` / `would-block`, but no real order is refused. `enforce` converts the same verdicts into a veto plus a `20s` symbol cooldown. The mode is operator-only (`POST /api/settings/order-flow-mode` or the AI Club toggle) and persists in the vault; the council may tune the four thresholds one capped step at a time, but it cannot vote the gate into enforce. These are starting hypotheses, not proven profitable levels — observation comes before blocking.
+
 ---
 
 ## 7. Core Trading Rules & Capital Mechanics
@@ -453,6 +549,7 @@ Because Binance USDⓈ-M Futures REST `/fapi/v1/klines` only supports intervals 
 | **Execution Timeframe** | **15-Second (`15s`) Candles** | Real-time UTC-aligned `15,000ms` candles from `<symbol>@aggTrade` WebSocket ticks, **or the REST `/fapi/v1/trades` sweep when the stream starves**, plus `/fapi/v1/aggTrades` warmup. |
 | **Base Margin / Trade** | **`$2.000000` USDT** | Dedicated base margin per position entry. |
 | **Fee Hurdle Gate** | **`2.00x` round-trip taker cost (`minFeeHurdleMultiple`)** | Before an entry is approved, the 15-second ATR excursion is compared against the round-trip taker cost (`2 × feeRate × notional`). A candidate that cannot expectedly move at least **twice** its own round-trip cost is rejected outright and its symbol gets a `20s` cooldown, so the book stops paying fees on moves too small to ever net positive. The multiple is a council-tunable parameter, not a constant. |
+| **Order Flow Gate** | **Six gates over a rolling `60s` window — `shadow` by default** | `server/engine/orderFlowStrategy.ts` scores every `15s` trigger from the top-20 depth book (`@depth20@500ms`) and the executed tape: fee-plus-spread cost, OBI, CVD level+slope, aggressive buy/sell ratio, price location in the window's range, and absorption. Defaults: OBI `±0.20`, ratio `1.50x` (reciprocal `0.67x` for `SHORT`), absorption `1.60x`, minimum `5` active tape seconds, `5s` book freshness. In `shadow` the verdict is counted and logged as `WOULD-ENTER`/`WOULD-BLOCK` and nothing is refused; `enforce` vetoes a non-confirming verdict and cools the symbol `20s`. Operator-switched, never council-switched; the four thresholds are council-tunable. |
 | **Leverage Fallback Ladder** | **`10x → 11x → 12x → 13x → 14x → 15x`** | Attempts `10x` first. If order execution, `MIN_NOTIONAL`, or `LOT_SIZE` `minQty`/`stepSize` fails at `10x`, automatically escalates `11x`, `12x`, `13x`, `14x`, up to `15x`. Only a **pre-fill** rejection may escalate; an ambiguous answer is resolved by reading `GET /papi/v1/um/order?origClientOrderId` before any re-send, so a ladder step can never double-fill. |
 | **Profit Target & Trail** | **`+5.000000%` ROI → Trailing Stop** | The instant ROI hits `+5.000000%`, Trailing Stop arms, locks a fee-positive profit floor, and trails peak ROI dynamically to capture maximum profit. |
 | **Protective Stop** | **`-6.000000%` ROI** (`-9.500000%` before `v1.5.0`) | Hard catastrophic-exposure floor on every open position, independent of the trail, evaluated **before** the trailing branch so a breach can never be re-labelled a trailing exit. Every position also carries an **exchange-side `STOP_MARKET`** (`closePosition:'true'`, `workingType:'MARK_PRICE'`, `priceProtect:'TRUE'`) placed at open, so the floor survives a dead process or a `1s` poll gap. The **achieved** exit can still be worse than the guard — one `FIGHTUSDT` close landed at `-12.090464%` against the old `-9.500000%` level because a thin perpetual gapped through the stop between polls. Budget for `guard + slippage`, not `guard`. |
@@ -553,6 +650,8 @@ Post-mortem is now `forensicAuditor → improvementDraft → councilVote → app
 
 `v1.5.0` closed two integrity holes in that ballot. Directional semantics were ambiguous for parameters where a **larger** number is the **stricter** setting (`minFeeHurdleMultiple`, `protectiveStopRoiPct` magnitude, `cooldownSecondsAfterLoss`), so a "tightening" proposal could be balloted as a loosening and vice versa; the council now carries an explicit `HIGHER_IS_TIGHTER` table and classifies every mutation by which bound it moves, not by its sign. Separately, a mutation whose step exceeded `MAX_STEP` for that parameter was previously reaching the vote at all — it is now refused before a seat spends a ballot on it, so the tape only ever shows proposals the council could legitimately accept.
 
+`v1.6.0` puts the four order-flow thresholds under the same ballot — `orderFlowMinObi`, `orderFlowMinVolumeRatio`, `orderFlowWindowSec`, `orderFlowAbsorptionMultiple` — but deliberately leaves the **mode** outside it. The council can make the gate stricter or looser within its step cap; it cannot vote itself into blocking live orders. `orderFlowAbsorptionMultiple` is marked inverted because it controls a *block*: raising it means fewer trades are refused, which is a loosening, and the owner seat now scores it that way instead of by the sign of the number. `ADVERSE_TAKER_FLOW` is the autopsy cause that unlocks the OBI and ratio levers.
+
 ### What the loop has actually produced so far
 
 This is not a demo mode, and the artifacts are inspectable on disk rather than asserted here. Counted from the live vault and the same `2026-10-28T22:30:48Z` snapshot as [§2](#2-execution-ledger--live-verified):
@@ -595,17 +694,20 @@ Designed around a clean, focused hardware console aesthetic paired with the **Lo
 
 The primary screen remains pure and distraction-free—displaying **only** your **Start Balance**, **Current Equity**, **Open Trades**, and **40-Asset Market Scanner**—while **PNL Ledger**, **AI Club**, **System & Error Logs**, and **Vault Settings & Whitelist IPs** open cleanly via physical tactile switches in the header.
 
-### The two big numbers are drawn, not typeset
+Every scanner row carries a **`Book / 60s Tape`** column — `OBI`, quote-denominated `CVD`, aggressor ratio and spread in basis points — plus a **flow badge** naming the gate that refused the setup (`OBI ✕`, `CVD ✕`, `RATIO ✕`, `RANGE ✕`, `COST ✕`, `ABSORBED`). The scanner therefore shows *why* an asset is not being traded, not merely that it is not. The AI Club panel carries the layer's book/tape liveness, would-enter vs would-block counters and refusal counts by gate; see [§6](#6-real-time-15-second-candle-engine--pullback-strategy).
 
-Start Balance and Current Equity are seven-segment LED readouts (`src/components/SevenSegmentNumber.tsx`). Segments `a`–`g` are chamfered hexagonal polygons with a `1px` gap at every joint, defined once in a hidden `<defs>` sheet; every digit column is its own `<svg>` viewport clipping a **`30`-glyph strip** (`0–9` three times over) that rolls into place on a spring (`stiffness 220`, `damping 30`), staggered right-to-left so the least-significant digit settles last — the way a mechanical odometer and an LED panel both behave.
+### The two big numbers are seven-segment, not typeset
+
+Start Balance and Current Equity are seven-segment LED readouts (`src/components/SevenSegmentNumber.tsx`) set in **DSEG7 Classic Bold**, a SIL Open Font License typeface drawn for seven-segment hardware. It is self-hosted at `public/fonts/DSEG7Classic-Bold.woff2` with its licence beside it, preloaded from `index.html`, and served with `font-display: block` so the panel never flashes fallback numerals. The previous release drew segments by hand; at `22px` a hand-placed `1px` joint cannot survive rounding, and `4` and `9` closed into blocks. The face's own geometry has no such failure mode: typographic ascent is `1000` with descent `0`, so **one em of type is exactly one digit row**, with a `0.816em` advance against `0.618em` of lit ink.
 
 - **The odometer reads cents, not noise.** A live equity changes below the fourth decimal every tick, and a display that rolls every second is unreadable rather than precise. The big figures use `fmtUsd2`; the exact `0.000000` value stays as text beside it, so nothing is lost — only the flicker is.
-- **It always rolls the short way.** The strip picks the nearest of three copies, so `9 → 0` moves one column right instead of nine columns left, and the position silently re-centres once the spring settles. A five-decimal readout used to spin the whole strip on every tick.
-- **Unlit segments are drawn.** Behind every digit sits a `7`-segment ghost at `0.075` opacity, so a `1` occupies an `8`-shaped socket instead of floating in empty space — the detail that makes it read as a panel rather than as floating bars.
+- **It still rolls the short way.** The strip is thirty digit rows (`0–9` three times). Each column picks the nearest copy, so `9 → 0` moves one row instead of nine, then silently re-centres into the middle decade once the spring (`stiffness 220`, `damping 30`, `mass 0.6`) settles.
+- **Unlit segments are drawn.** Behind every digit sits a ghost `8` at `0.075` opacity, so a `1` occupies an `8`-shaped socket instead of floating in empty space — the detail that makes it read as a panel rather than as floating bars.
+- **Punctuation is drawn, not typed.** DSEG's period occupies a full digit advance, which would punch a hole in the number; the dot is a `0.26em` element on the baseline and the minus is a drawn bar. Neither moves the columns.
 - **Equity changes colour on its own meaning**: mint `#ADEBB3` while ahead of the locked start balance, coral `#FF857A` once behind it. Start balance stays orchid — it is a reference, not a result.
-- **Nothing reflows.** The readouts occupy the same line box the text used; glyph height is driven by one media query (`26px` ≥`640px`, `22px` below). The bloom is a static two-layer `drop-shadow`, not an animation.
-- **A screen reader never sees segments.** Each readout is `role="img"` with `aria-label="Current equity 11.851562 USDT, behind start balance"` (the exact `0.000000` figure, not the cents the odometer shows), and every glyph is `aria-hidden`.
-- **`prefers-reduced-motion` renders a static transform** instead of animating, and the slot LEDs stop pulsing.
+- **Nothing reflows.** Glyph height is driven by one media query (`26px` ≥`640px`, `22px` below); columns are `0.72em` wide, the type is set at `0.94em` of the row so metric rounding cannot clip the ink, and the bloom is a static two-layer `drop-shadow`, not an animation.
+- **A screen reader never sees segments.** Each readout is `role="img"` with `aria-label="Current equity 11.850675 USDT, behind start balance"` (the exact `0.000000` figure, not the cents the odometer shows), and every glyph is `aria-hidden`.
+- **`prefers-reduced-motion` renders a static glyph** instead of animating, and the slot LEDs stop pulsing.
 
 Open-trade slots carry their own signal: a slow `1.5s` mint pulse while the position is net-positive, a fast `0.8s` coral alarm while net-negative, driven by **net** PNL after fees — because a position that is gross-positive and net-negative is losing money. Trailing-stop arming keeps a separate orchid ring so "in profit" and "the predator is armed" are not the same light doing two jobs. **Colour is never the only carrier**: the same state prints a `TrendingUp`/`TrendingDown` glyph and an `sr-only` "net profit" / "net loss" reading, so the row survives a colour-blind eye, a grayscale print, and a screen reader.
 
@@ -794,6 +896,7 @@ Out of the box, **HFT** uses its built-in calibrated **System-1 RLCD Engine** (`
 | `POST /api/settings/bind-ip` | Pin outbound Binance HTTP/WS sockets to a specific local NIC IPv4 (`{ localAddress }`), or `null` to clear. Anything that is not an IPv4 literal is refused with `400` — a typo here would make every signed request fail to leave the machine |
 | `POST /api/settings/local-ai` | Switch System-1 runtime (`builtin`, `ollama_nimble`, `laya_http`, `kev_http`). `endpointUrl` must resolve to `localhost`, `::1` or an IPv4 literal in `127/8`, `10/8`, `172.16–31` or `192.168/16`; credentials in the URL, query strings, fragments and non-`http(s)` schemes are refused. On refusal nothing is stored and the reasons come back as `{ rejected }` with `400` |
 | `POST /api/settings/style-params` | Override the live self-mutated strategy parameter set (trailing floor/callback, protective stop, RSI bands, orderflow & AI-conviction minimums, fee-hurdle multiple). Every key is range-bounded and non-finite values are dropped, then relationships are checked: `minLeverage > maxLeverage` discards both, a `trailingFloorRoiPct` above `trailingTriggerRoiPct` is discarded. Unknown keys are never written, so `{ apiKey, engineRunning }` cannot reach the vault. Returns `{ accepted, rejected }`; `400` only when nothing at all was accepted. Read current values from `snapshot.styleParams` |
+| `POST /api/settings/order-flow-mode` | Switch the six-gate order-flow layer between `shadow` (default — score and log every verdict, block nothing) and `enforce` (a non-confirming verdict vetoes the entry and puts the symbol on a `20s` cooldown). Body `{ mode }`; any other value is refused with `400` and the current mode. Operator-only — the improvement council may tune the thresholds but cannot change the mode. Read back from `snapshot.orderFlow` |
 | `POST /api/settings/directives` | Bind a standing order the entry path must obey: `{ kind, symbol?, value?, reason? }`. Rejects an unknown `kind`, a non-`USDT` pair for `STAND_DOWN_SYMBOL`, and a missing threshold for the four numeric kinds (`400`). Read back from `snapshot.operatorDirectives` |
 | `POST /api/settings/directives/toggle` | Lift or re-activate a rule (`{ id, active }`) — a lifted rule is removed from the veto path, not just greyed out |
 | `POST /api/settings/notes` | Add an advisory briefing (`{ text }`) that is quoted into the agents on every entry. Read back from `snapshot.operatorNotes` |
@@ -822,7 +925,10 @@ Out of the box, **HFT** uses its built-in calibrated **System-1 RLCD Engine** (`
 hft/
 ├── public/
 │   ├── favicon.svg               # HFT Candlestick + Breakout Arrow icon
-│   └── logo-banner.svg           # Full HFT Automation Trading Bot hero banner
+│   ├── logo-banner.svg           # Full HFT Automation Trading Bot hero banner
+│   └── fonts/
+│       ├── DSEG7Classic-Bold.woff2 # Self-hosted seven-segment console face (SIL OFL)
+│       └── DSEG-LICENSE.txt        # OFL licence for the DSEG typeface
 ├── server/
 │   ├── index.ts                  # Unified Express + WS (/ws) + Static/Vite server (0.0.0.0)
 │   ├── types.ts                  # Strict domain & telemetry TypeScript definitions
@@ -836,13 +942,16 @@ hft/
 │   ├── binance/
 │   │   ├── rateGovernor.ts       # Priority-tiered per-host API weight & order governor (FAPI + PAPI buckets)
 │   │   ├── restClient.ts         # Keep-Alive HMAC-SHA256 client: signed -> papi, public market data -> fapi
-│   │   ├── wsStreamManager.ts    # fstream WS manager: rotating edge DNS + frame-staleness watchdog + liveness-based telemetry
+│   │   ├── wsStreamManager.ts    # fstream WS manager: rotating edge DNS, depth20/aggTrade/market staleness watchdogs
 │   │   └── candleBuilder15s.ts   # 15s OHLCV + Orderflow Delta aggregator · seals only elapsed windows, never fabricates bars
 │   ├── engine/
 │   │   ├── stateStore.ts         # Atomic encrypted vault & persistent Start Balance / AI brain / standing orders
 │   │   ├── restMarketFeed.ts     # REST standby feed: 1s prices · 10s 24h · round-robin tape sweep + trade-ID dedup
 │   │   ├── marketScanner.ts      # Top-40 (20 Pos / 20 Neg) 24h USDT-M scanner + 95% pause logic
 │   │   ├── strategy15s.ts        # 15s Pullback + Bullish/Bearish Confirmation detector
+│   │   ├── orderFlowTracker.ts   # 1s executed-tape buckets: quote CVD, slope, aggressor ratio & aggression multiples
+│   │   ├── orderBookTracker.ts   # Depth20 book state: distance-weighted OBI, spread bps & touch refill vs EMA
+│   │   ├── orderFlowStrategy.ts  # Six-gate flow verdict: cost, OBI, CVD, ratio, price location, absorption
 │   │   ├── positionMonitor1s.ts  # 1s Open Position check, Binance Fees, Net PNL, 5% ROI Trail & -6% Protective Stop
 │   │   ├── incomeLedger.ts       # Settled exchange income: per-symbol funding vs account-wide commission
 │   │   ├── pnlLedger.ts          # Per-close ledger series & win/loss, fee and funding aggregates
@@ -861,11 +970,11 @@ hft/
 │   ├── components/
 │   │   ├── HftBrandLogo.tsx      # Vector HFT Candlestick + Breakout Arrow logo lockup
 │   │   ├── HeaderChassis.tsx     # Top hardware chassis, data-liveness diode & Master Engine switch
-│   │   ├── SevenSegmentNumber.tsx# Drawn seven-segment LED readout with spring odometer roll
+│   │   ├── SevenSegmentNumber.tsx# DSEG7 Classic LED readout with spring odometer roll & ghost segments
 │   │   ├── EquityBezel.tsx       # Fixed Start Balance & Current Equity LED bezel + 95% pool bar
 │   │   ├── OpenTradesDeck.tsx    # Live 1s Open Trades table with net-PNL slot LEDs, fees & trailing badge
-│   │   ├── MarketScannerDeck.tsx # Dual-bank 40-asset scanner with 15s pullback/confirmation states
-│   │   ├── AiAgentClubModal.tsx  # 5-Agent council, loss autopsies, shared memory & operator briefing
+│   │   ├── MarketScannerDeck.tsx # Dual-bank 40-asset scanner with 15s states + OBI/CVD/ratio/spread columns
+│   │   ├── AiAgentClubModal.tsx  # 5-Agent council, order-flow panel, loss autopsies, shared memory & briefing
 │   │   ├── PnlLedgerModal.tsx    # Hand-drawn SVG PNL trellis + volume / accuracy / friction readout bands
 │   │   ├── LotusSelect.tsx       # Portal-mounted tactile dropdown (keyboard driven, viewport aware)
 │   │   ├── SettingsVaultModal.tsx# API credentials vault, Multi-IPv4 whitelist & Start Balance reset
@@ -876,7 +985,7 @@ hft/
 │   └── utils/
 │       └── format.ts             # 6-decimal readouts + `fmtUsd2` cents for the odometer
 ├── scripts/
-│   ├── selfTest.ts               # Automated verification suite for strategy, trailing stop & AI Club
+│   ├── selfTest.ts               # Automated verification suite for strategy, order flow, trailing stop & AI Club
 │   ├── diagnoseApiKey.ts         # Vault decrypt health + live Spot/Futures/Portfolio Margin permission probe
 │   └── diagnoseMarketData.ts     # Per-edge fstream handshake/ACK/data-frame matrix + REST cross-check
 ├── ecosystem.config.cjs          # PM2 production process configuration

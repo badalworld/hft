@@ -3,7 +3,15 @@ import type { BinanceFuturesRestClient } from '../binance/restClient.js';
 import type { BinanceWsStreamManager, Ticker24hStreamItem } from '../binance/wsStreamManager.js';
 import type { CandleBuilder15s } from '../binance/candleBuilder15s.js';
 import { evaluate15sPullbackStrategy } from './strategy15s.js';
+import { evaluateOrderFlow } from './orderFlowStrategy.js';
+import type { OrderFlowTracker } from './orderFlowTracker.js';
+import type { OrderBookTracker } from './orderBookTracker.js';
 import { logger } from '../utils/logger.js';
+
+export interface OrderFlowSources {
+  flow: OrderFlowTracker;
+  book: OrderBookTracker;
+}
 
 interface RankResult {
   picks: Ticker24hStreamItem[];
@@ -24,7 +32,8 @@ export class MarketScanner40 {
   constructor(
     private readonly restClient: BinanceFuturesRestClient,
     private readonly wsManager: BinanceWsStreamManager,
-    private readonly candleBuilder: CandleBuilder15s
+    private readonly candleBuilder: CandleBuilder15s,
+    private readonly orderFlow?: OrderFlowSources
   ) {}
 
   public ingestTickerBatch(items: Ticker24hStreamItem[]) {
@@ -296,6 +305,8 @@ export class MarketScanner40 {
       ? Math.min(15, Math.max(10, Math.ceil((filter.minNotional * 1.02) / params.style.baseMarginUsd)))
       : 10;
 
+    const flowDecision = this.evaluateDisplayFlow(t.symbol, side, params.style);
+
     return {
       symbol: t.symbol,
       directionBucket: bucket,
@@ -313,6 +324,12 @@ export class MarketScanner40 {
       ema21: snap.ema21,
       pullbackDepthPct: eval15s.pullbackDepthPct,
       orderflowDeltaRatio: snap.orderflowDeltaRatio,
+      obi: flowDecision.obi,
+      cvd60sUsd: flowDecision.cvdUsd,
+      buySellRatio60s: flowDecision.buySellRatio,
+      spreadBps: flowDecision.spreadBps,
+      flowVerdict: flowDecision.verdict,
+      flowReason: flowDecision.reasons[0] ?? '',
       aiConfidence: eval15s.triggered ? 0.72 : eval15s.stage === 'PULLBACK_DETECTED' ? 0.58 : 0.42,
       recommendedLeverage: minLev,
       candleCount15s: snap.candleCount,
@@ -321,6 +338,29 @@ export class MarketScanner40 {
       substitutedFor,
       updatedAt: now,
     };
+  }
+
+  /**
+   * Display-side verdict for the scanner deck. It runs the same pure gate as the entry
+   * path, minus the cost arithmetic, which needs the symbol's live taker rate and the
+   * 15s ATR of a triggered setup — neither of which exists for a card that is only being
+   * watched. The deck therefore shows direction agreement, never a fee verdict.
+   */
+  private evaluateDisplayFlow(symbol: string, side: 'LONG' | 'SHORT', style: AdaptiveStyleParams) {
+    if (!this.orderFlow) {
+      return evaluateOrderFlow({
+        side,
+        book: null,
+        flow: null,
+        params: style,
+      });
+    }
+    return evaluateOrderFlow({
+      side,
+      book: this.orderFlow.book.getSnapshot(symbol),
+      flow: this.orderFlow.flow.getSnapshot(symbol, style.orderFlowWindowSec),
+      params: style,
+    });
   }
 
   private async backgroundWarmup15s(symbols: string[]) {

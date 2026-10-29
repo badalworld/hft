@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
+  Activity,
   BrainCircuit,
   Cpu,
   GitBranch,
@@ -114,6 +115,7 @@ interface AiAgentClubModalProps {
   snapshot: DashboardSnapshot | null;
   onClose: () => void;
   onUpdateLocalAi: (cfg: Partial<LocalDecisionConfig>) => Promise<{ ok: boolean; message: string }>;
+  onSetOrderFlowMode: (mode: 'shadow' | 'enforce') => Promise<BriefingResult>;
   onAddDirective: (d: {
     kind: OperatorDirectiveKind;
     symbol?: string;
@@ -130,6 +132,7 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
   snapshot,
   onClose,
   onUpdateLocalAi,
+  onSetOrderFlowMode,
   onAddDirective,
   onToggleDirective,
   onAddNote,
@@ -417,6 +420,127 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
                   </div>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* 2b. ORDER FLOW LAYER — OBI, CVD, LIQUIDITY & ABSORPTION */}
+          {style && snapshot?.orderFlow && (
+            <div className="skeuo-plate rounded-xl p-4">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Activity className="h-4 w-4 text-[#D9A441]" />
+                  <h3 className="text-xs font-bold uppercase tracking-[0.14em] text-white">
+                    Order Flow Layer — Book Imbalance · Executed Delta · Absorption
+                  </h3>
+                </div>
+                <div className="skeuo-oled flex items-center gap-1 rounded-xl p-1 text-[10px]">
+                  {(['shadow', 'enforce'] as const).map((m) => {
+                    const active = snapshot.orderFlow.mode === m;
+                    return (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => {
+                          if (active || briefingBusy) return;
+                          setBriefingBusy(true);
+                          onSetOrderFlowMode(m).finally(() => setBriefingBusy(false));
+                        }}
+                        aria-pressed={active}
+                        title={
+                          m === 'shadow'
+                            ? 'Score and log every verdict; never block an entry.'
+                            : 'A non-confirming book/tape verdict vetoes the entry.'
+                        }
+                        className={`rounded-lg px-2.5 py-1 font-bold uppercase tracking-wider transition-all cursor-pointer ${
+                          active
+                            ? m === 'enforce'
+                              ? 'bg-[#FF857A]/20 text-[#FF857A] border border-[#FF857A]/50'
+                              : 'bg-[#EBAEE6]/20 text-[#EBAEE6] border border-[#EBAEE6]/50'
+                            : 'text-[#a98b88] hover:text-white'
+                        }`}
+                      >
+                        {m}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+                <div className="skeuo-oled rounded-lg p-2.5">
+                  <div className="text-[10px] text-[#c7a8a5]">Depth / Tape Feed</div>
+                  <div className="font-mono-num text-xs font-bold">
+                    <span className={snapshot.orderFlow.depthLive ? 'text-[#ADEBB3]' : 'text-[#FF857A]'}>
+                      BOOK {snapshot.orderFlow.depthLive ? 'LIVE' : 'DEAD'}
+                    </span>
+                    <span className="text-[#a98b88]"> · </span>
+                    <span className={snapshot.orderFlow.tapeLive ? 'text-[#ADEBB3]' : 'text-[#FF857A]'}>
+                      TAPE {snapshot.orderFlow.tapeLive ? 'LIVE' : 'DEAD'}
+                    </span>
+                  </div>
+                </div>
+                <div className="skeuo-oled rounded-lg p-2.5">
+                  <div className="text-[10px] text-[#c7a8a5]">Live Books / Watched</div>
+                  <div className="font-mono-num text-xs font-bold text-[#fdf6f5]">
+                    {snapshot.orderFlow.liveBooks} / {snapshot.orderFlow.watchedSymbols}
+                  </div>
+                </div>
+                <div className="skeuo-oled rounded-lg p-2.5">
+                  <div className="text-[10px] text-[#c7a8a5]">Would-Enter / Would-Block</div>
+                  <div className="font-mono-num text-xs font-bold">
+                    <span className="text-[#ADEBB3]">{snapshot.orderFlow.confirmed}</span>
+                    <span className="text-[#a98b88]"> / </span>
+                    <span className="text-[#FF857A]">{snapshot.orderFlow.blocked}</span>
+                  </div>
+                </div>
+                <div className="skeuo-oled rounded-lg p-2.5">
+                  <div className="text-[10px] text-[#c7a8a5]">OBI Floor · Aggressor Ratio</div>
+                  <div className="font-mono-num text-xs font-bold text-[#EBAEE6]">
+                    ±{fmt6(style.orderFlowMinObi)} · {fmt6(style.orderFlowMinVolumeRatio)}x
+                  </div>
+                </div>
+                <div className="skeuo-oled rounded-lg p-2.5">
+                  <div className="text-[10px] text-[#c7a8a5]">Flow Window · Absorption</div>
+                  <div className="font-mono-num text-xs font-bold text-[#fdf6f5]">
+                    {Math.round(style.orderFlowWindowSec)}s ·{' '}
+                    {fmt6(style.orderFlowAbsorptionMultiple)}x
+                  </div>
+                </div>
+                <div className="skeuo-oled col-span-2 rounded-lg p-2.5 sm:col-span-3">
+                  <div className="text-[10px] text-[#c7a8a5]">Refusals by gate since boot</div>
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {Object.keys(snapshot.orderFlow.byVerdict).length === 0 ? (
+                      <span className="font-mono-num text-[11px] text-[#a98b88]">
+                        No 15s trigger has reached the flow gate yet.
+                      </span>
+                    ) : (
+                      Object.entries(snapshot.orderFlow.byVerdict).map(([verdict, count]) => (
+                        <span
+                          key={verdict}
+                          className={`rounded border px-1.5 py-[1px] font-mono-num text-[10px] ${
+                            verdict === 'CONFIRM'
+                              ? 'border-[#ADEBB3]/45 bg-[#ADEBB3]/12 text-[#ADEBB3]'
+                              : 'border-[#EBAEE6]/30 bg-black/35 text-[#e7cecc]'
+                          }`}
+                        >
+                          {verdict} {count}
+                        </span>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <p className="mt-2.5 text-[10px] leading-relaxed text-[#b99895]">
+                Six gates run on every 15s trigger, in this order: fee-plus-spread cost, book
+                imbalance, executed delta level and slope, aggressive buy/sell ratio, price
+                location in the window's range, and absorption. In{' '}
+                <strong className="text-[#EBAEE6]">shadow</strong> the verdict is
+                scored and written to the tape but never blocks. In{' '}
+                <strong className="text-[#FF857A]">enforce</strong> a non-confirming verdict vetoes
+                the entry and puts the symbol on a 20s cooldown. These thresholds are starting
+                hypotheses the council may tune — one capped step at a time.
+              </p>
             </div>
           )}
 

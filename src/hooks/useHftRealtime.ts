@@ -355,6 +355,11 @@ export function useHftRealtime() {
     return data as { ok?: boolean; message?: string };
   }, [applySnapshot]);
 
+  const setOrderFlowMode = useCallback(
+    (mode: 'shadow' | 'enforce') => postSetting('/api/settings/order-flow-mode', { mode }),
+    [postSetting]
+  );
+
   const addDirective = useCallback(
     (directive: {
       kind: OperatorDirectiveKind;
@@ -394,6 +399,7 @@ export function useHftRealtime() {
     updateLocalAi,
     manualClosePosition,
     clearLogs,
+    setOrderFlowMode,
     addDirective,
     toggleDirective,
     addNote,

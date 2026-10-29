@@ -7,8 +7,8 @@ import {
   Radio,
   RefreshCw,
 } from 'lucide-react';
-import type { ScannerAsset, ScannerOperatingState } from '../types/hft';
-import { fmt6, fmtSigned6 } from '../utils/format';
+import type { OrderFlowVerdict, ScannerAsset, ScannerOperatingState } from '../types/hft';
+import { fmt6, fmtCompactUsd, fmtSigned4, fmtSigned6 } from '../utils/format';
 
 interface MarketScannerDeckProps {
   positiveAssets: ScannerAsset[];
@@ -65,6 +65,35 @@ const StageBadge: React.FC<{ stage: ScannerAsset['stage']; side: 'LONG' | 'SHORT
   );
 };
 
+/** Short labels: the deck shows which gate refused, not the whole sentence. */
+const FLOW_LABEL: Record<OrderFlowVerdict, string> = {
+  CONFIRM: 'FLOW OK',
+  NO_SIGNAL: 'THIN TAPE',
+  NO_DATA: 'NO BOOK',
+  OBI_REJECT: 'OBI ✕',
+  CVD_REJECT: 'CVD ✕',
+  RATIO_REJECT: 'RATIO ✕',
+  PRICE_REJECT: 'RANGE ✕',
+  EXECUTION_REJECT: 'COST ✕',
+  ABSORPTION_REJECT: 'ABSORBED',
+};
+
+const FlowBadge: React.FC<{ verdict: OrderFlowVerdict }> = ({ verdict }) => {
+  const tone =
+    verdict === 'CONFIRM'
+      ? 'border-[#ADEBB3]/50 bg-[#ADEBB3]/15 text-[#ADEBB3]'
+      : verdict === 'NO_DATA' || verdict === 'NO_SIGNAL'
+      ? 'border-white/12 bg-black/40 text-[#a98b88]'
+      : 'border-[#FF857A]/40 bg-[#FF857A]/12 text-[#FF857A]';
+  return (
+    <span
+      className={`inline-flex items-center rounded border px-1.5 py-[1px] font-mono-num text-[9px] uppercase tracking-wider ${tone}`}
+    >
+      {FLOW_LABEL[verdict] ?? 'FLOW —'}
+    </span>
+  );
+};
+
 /**
  * The snapshot re-arrives roughly once a second and every asset object is new, so a plain
  * memo would never hit. Comparing the printed fields lets a bank of 20 rows re-render only
@@ -73,6 +102,12 @@ const StageBadge: React.FC<{ stage: ScannerAsset['stage']; side: 'LONG' | 'SHORT
 const ScannerRow: React.FC<{ asset: ScannerAsset; side: 'LONG' | 'SHORT' }> = React.memo(
   ({ asset, side }) => {
     const isLong = side === 'LONG';
+    // A frame from a pre-order-flow build carries none of these; render them as blank
+    // rather than letting undefined reach .toFixed().
+    const obi = typeof asset.obi === 'number' ? asset.obi : null;
+    const cvd = typeof asset.cvd60sUsd === 'number' ? asset.cvd60sUsd : null;
+    const ratio = typeof asset.buySellRatio60s === 'number' ? asset.buySellRatio60s : null;
+    const spread = typeof asset.spreadBps === 'number' ? asset.spreadBps : null;
     return (
       <tr title={asset.lastSignalReason} className="transition-colors hover:bg-[#6B403C]/22">
         <td className="py-2 pl-3 pr-2 font-mono-num text-[10px] text-[#b99895]">
@@ -110,8 +145,36 @@ const ScannerRow: React.FC<{ asset: ScannerAsset; side: 'LONG' | 'SHORT' }> = Re
           <div>RSI {fmt6(asset.rsi15s)}</div>
           <div className="text-[#EBAEE6]">Δ {fmt6(asset.orderflowDeltaRatio)}x</div>
         </td>
+        <td
+          title={asset.flowReason}
+          className="px-2 py-2 text-right font-mono-num text-[10px] leading-tight"
+        >
+          <div
+            className={
+              obi === null ? 'text-[#a98b88]' : obi >= 0 ? 'text-[#ADEBB3]' : 'text-[#FF857A]'
+            }
+          >
+            OBI {obi === null ? '—' : fmtSigned4(obi)}
+          </div>
+          <div
+            className={
+              cvd === null ? 'text-[#a98b88]' : cvd >= 0 ? 'text-[#ADEBB3]' : 'text-[#FF857A]'
+            }
+          >
+            CVD {cvd === null ? '—' : fmtCompactUsd(cvd)}
+          </div>
+          <div className="text-[#b99895]">
+            {ratio === null ? '—' : `${ratio.toFixed(2)}x`}
+            {spread !== null && (
+              <span className="text-[#D9A441]"> · {spread.toFixed(1)}bp</span>
+            )}
+          </div>
+        </td>
         <td className="py-2 pl-2 pr-3 text-right">
-          <StageBadge stage={asset.stage} side={side} />
+          <div className="flex flex-col items-end gap-1">
+            <StageBadge stage={asset.stage} side={side} />
+            <FlowBadge verdict={asset.flowVerdict} />
+          </div>
         </td>
       </tr>
     );
@@ -126,6 +189,12 @@ const ScannerRow: React.FC<{ asset: ScannerAsset; side: 'LONG' | 'SHORT' }> = Re
     prev.asset.pullbackDepthPct === next.asset.pullbackDepthPct &&
     prev.asset.rsi15s === next.asset.rsi15s &&
     prev.asset.orderflowDeltaRatio === next.asset.orderflowDeltaRatio &&
+    prev.asset.obi === next.asset.obi &&
+    prev.asset.cvd60sUsd === next.asset.cvd60sUsd &&
+    prev.asset.buySellRatio60s === next.asset.buySellRatio60s &&
+    prev.asset.spreadBps === next.asset.spreadBps &&
+    prev.asset.flowVerdict === next.asset.flowVerdict &&
+    prev.asset.flowReason === next.asset.flowReason &&
     prev.asset.candleCount15s === next.asset.candleCount15s &&
     prev.asset.recommendedLeverage === next.asset.recommendedLeverage &&
     prev.asset.substitutedFor === next.asset.substitutedFor &&
@@ -181,7 +250,7 @@ const ScannerTableBank: React.FC<{
             Waiting for live Binance USDⓈ-M 24h market stream (`!ticker@arr`)...
           </div>
         ) : (
-          <table className="w-full min-w-[540px] border-collapse text-left text-[11px]">
+          <table className="w-full min-w-[680px] border-collapse text-left text-[11px]">
             <thead className="sticky top-0 z-10 border-b border-[#EBAEE6]/15 bg-[#201110] text-[10px] uppercase tracking-wider text-[#dec2bf]">
               <tr>
                 <th className="py-2.5 pl-3 pr-2">#</th>
@@ -190,7 +259,8 @@ const ScannerTableBank: React.FC<{
                 <th className="px-2 py-2.5 text-right">Last Price</th>
                 <th className="px-2 py-2.5 text-right">15s Pullback</th>
                 <th className="px-2 py-2.5 text-right">15s RSI / Δ</th>
-                <th className="py-2.5 pl-2 pr-3 text-right">15s Signal</th>
+                <th className="px-2 py-2.5 text-right">Book / 60s Tape</th>
+                <th className="py-2.5 pl-2 pr-3 text-right">Trigger / Flow</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#EBAEE6]/[0.06]">

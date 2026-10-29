@@ -8,6 +8,8 @@ import type {
   OpenTradePosition,
   OperatorDirective,
   OperatorNote,
+  OrderFlowDecision,
+  OrderFlowMode,
   ScannerOperatingState,
   ServerIpReport,
 } from '../types.js';
@@ -15,6 +17,9 @@ import { BinanceRateGovernor } from '../binance/rateGovernor.js';
 import { BinanceFuturesRestClient, type RawOrderResult } from '../binance/restClient.js';
 import { CandleBuilder15s } from '../binance/candleBuilder15s.js';
 import { BinanceWsStreamManager } from '../binance/wsStreamManager.js';
+import { OrderFlowTracker } from './orderFlowTracker.js';
+import { OrderBookTracker } from './orderBookTracker.js';
+import { evaluateOrderFlow } from './orderFlowStrategy.js';
 import { AiAgentClubOrchestrator } from '../ai/agentClubGraph.js';
 import { StateStore } from './stateStore.js';
 import { MarketScanner40 } from './marketScanner.js';
@@ -47,6 +52,8 @@ export class HftBotEngine {
   public readonly rateGovernor = new BinanceRateGovernor();
   public readonly restClient = new BinanceFuturesRestClient(this.rateGovernor);
   public readonly candleBuilder = new CandleBuilder15s();
+  public readonly orderFlowTracker = new OrderFlowTracker();
+  public readonly orderBookTracker = new OrderBookTracker();
   public readonly wsManager = new BinanceWsStreamManager(
     this.rateGovernor,
     this.restClient,
@@ -80,6 +87,13 @@ export class HftBotEngine {
 
   private commissionMap = new Map<string, number>();
   private cooldownUntilMap = new Map<string, number>();
+  /** Last time each symbol+verdict pair was written to the tape, so repeats stay quiet. */
+  private flowLogAt = new Map<string, number>();
+  private flowStats: { confirmed: number; blocked: number; byVerdict: Record<string, number> } = {
+    confirmed: 0,
+    blocked: 0,
+    byVerdict: {},
+  };
   private openingInFlight = new Set<string>();
   private closingInFlight = new Set<string>();
   /** posKey -> working exchange stop orderId, so exactly one stop protects a position. */
@@ -96,7 +110,10 @@ export class HftBotEngine {
   private snapshotSubscribers = new Set<(snap: DashboardSnapshot) => void>();
 
   constructor() {
-    this.scanner = new MarketScanner40(this.restClient, this.wsManager, this.candleBuilder);
+    this.scanner = new MarketScanner40(this.restClient, this.wsManager, this.candleBuilder, {
+      flow: this.orderFlowTracker,
+      book: this.orderBookTracker,
+    });
     this.restMarketFeed = new RestMarketFeed(this.restClient, this.wsManager, this.candleBuilder);
     this.incomeLedger = new IncomeLedger(this.restClient, this.stateStore);
     this.positionMonitor = new PositionMonitor1s(this.stateStore);
@@ -145,6 +162,22 @@ export class HftBotEngine {
 
     this.wsManager.onAccountUpdate(() => {
       this.syncAccountAndPositions().catch(() => {});
+    });
+
+    // Order-flow inputs ride the streams that already exist: the tape feeds CVD from the
+    // same frame the candle builder consumes, and the depth socket is the only new
+    // subscription the whole layer adds.
+    this.wsManager.onAggTrade((frame) => {
+      this.orderFlowTracker.ingest(
+        frame.symbol,
+        frame.price,
+        frame.qty,
+        frame.tradeTimeMs,
+        frame.isBuyerMaker
+      );
+    });
+    this.wsManager.onDepthBook((frame) => {
+      this.orderBookTracker.ingest(frame.symbol, frame.bids, frame.asks, frame.eventTimeMs);
     });
 
     // Wire 15-second candle close trigger
@@ -397,6 +430,29 @@ export class HftBotEngine {
     return { rejected: [] };
   }
 
+  /**
+   * Shadow is the shipped default because the thresholds are hypotheses. Enforce is an
+   * explicit, reversible operator decision — never something the club can vote itself into.
+   */
+  public setOrderFlowMode(mode: string): { ok: boolean; mode: OrderFlowMode; message: string } {
+    if (mode !== 'shadow' && mode !== 'enforce') {
+      return {
+        ok: false,
+        mode: this.stateStore.getOrderFlowMode(),
+        message: `"${String(mode)}" is not an order-flow mode; use "shadow" or "enforce".`,
+      };
+    }
+    this.stateStore.setOrderFlowMode(mode);
+    logger.warn(
+      'ORDER_FLOW',
+      mode === 'enforce'
+        ? 'Order-flow gate switched to ENFORCE — a non-confirming book/tape verdict now blocks entries.'
+        : 'Order-flow gate switched to SHADOW — verdicts are scored and logged, no entry is blocked.'
+    );
+    this.broadcastSnapshot();
+    return { ok: true, mode, message: `Order-flow mode set to ${mode}.` };
+  }
+
   public updateStyleParams(input: unknown): { accepted: string[]; rejected: string[] } {
     const { accepted, rejected } = sanitizeStyleParams(this.aiClub.getStyleParams(), input);
     const keys = Object.keys(accepted);
@@ -553,6 +609,8 @@ export class HftBotEngine {
       const keep = new Set(watchedSymbols);
       this.candleBuilder.pruneSymbolsExcept(keep);
       this.restMarketFeed.pruneSymbolsExcept(keep);
+      this.orderFlowTracker.pruneSymbolsExcept(keep);
+      this.orderBookTracker.pruneSymbolsExcept(keep);
     }
 
     // 4. Push real-time 1s snapshot to UI
@@ -682,6 +740,41 @@ export class HftBotEngine {
     return 0.0005;
   }
 
+  /**
+   * One line per symbol+verdict per minute. A 15s trigger that keeps failing the same way
+   * says nothing new on the second bar, and a shadow layer that floods the tape is a
+   * shadow layer nobody reads.
+   */
+  private logFlowDecision(
+    symbol: string,
+    side: 'LONG' | 'SHORT',
+    decision: OrderFlowDecision,
+    mode: OrderFlowMode
+  ) {
+    this.flowStats.byVerdict[decision.verdict] =
+      (this.flowStats.byVerdict[decision.verdict] ?? 0) + 1;
+    if (decision.ok) this.flowStats.confirmed++;
+    else this.flowStats.blocked++;
+
+    const key = `${symbol}:${decision.verdict}`;
+    const now = Date.now();
+    if (now - (this.flowLogAt.get(key) ?? 0) < 60_000) return;
+    this.flowLogAt.set(key, now);
+
+    const detail = `${decision.verdict} — ${decision.reasons[0]}`;
+    if (mode === 'enforce') {
+      if (decision.ok) {
+        logger.success('ORDER_FLOW', `✅ ${symbol} ${side} cleared order flow: ${detail}`);
+      } else {
+        logger.ai('ORDER_FLOW', `⛔ ${symbol} ${side} blocked by order flow: ${detail}`);
+      }
+    } else if (decision.ok) {
+      logger.success('ORDER_FLOW', `SHADOW ${symbol} ${side} would-enter: ${detail}`);
+    } else {
+      logger.info('ORDER_FLOW', `SHADOW ${symbol} ${side} would-block: ${detail}`);
+    }
+  }
+
   private async handle15sCandleClosed(symbol: string) {
     if (!this.engineRunning || !this.apiConnected) return;
     if (this.isMarginExhausted95()) return;
@@ -738,6 +831,28 @@ export class HftBotEngine {
           hurdle.requiredRatio
         )}x) — skipping, the move cannot pay for its own exit.`
       );
+      return;
+    }
+
+    // Order Flow gate: book imbalance, executed delta, aggression ratio, range position
+    // and absorption, all read over a rolling window rather than the 15s trigger bar.
+    // Shadow mode scores and logs every decision and blocks nothing; flipping the vault
+    // setting to `enforce` turns the same verdicts into a hard veto.
+    const flowDecision = evaluateOrderFlow({
+      side,
+      book: this.orderBookTracker.getSnapshot(symbol),
+      flow: this.orderFlowTracker.getSnapshot(symbol, style.orderFlowWindowSec),
+      params: style,
+      // Excursion and cost are both linear in leverage, so the ladder's floor produces
+      // the same ratio any rung above it would.
+      expectedRoiPct: stratEval.features.volatilityAtrPct * Math.round(style.minLeverage),
+      leverage: Math.round(style.minLeverage),
+      takerFeeRate: this.takerRateFor(symbol),
+    });
+    const flowMode = this.stateStore.getOrderFlowMode();
+    this.logFlowDecision(symbol, side, flowDecision, flowMode);
+    if (flowMode === 'enforce' && !flowDecision.ok) {
+      this.cooldownUntilMap.set(symbol, Date.now() + 20_000);
       return;
     }
 
@@ -1427,6 +1542,17 @@ export class HftBotEngine {
       lessonPatterns: aggregateLessonPatterns(lessons),
       operatorDirectives: this.stateStore.getOperatorDirectives(),
       operatorNotes: this.stateStore.getOperatorNotes(),
+
+      orderFlow: {
+        mode: this.stateStore.getOrderFlowMode(),
+        confirmed: this.flowStats.confirmed,
+        blocked: this.flowStats.blocked,
+        byVerdict: { ...this.flowStats.byVerdict },
+        liveBooks: this.orderBookTracker.getFreshCount(),
+        watchedSymbols: this.wsManager.getWatchedSymbolCount(),
+        depthLive: this.wsManager.isDepthDataLive(),
+        tapeLive: this.wsManager.isAggTradeDataLive(),
+      },
 
       rateTelemetry: this.rateGovernor.getTelemetry(),
       ipReport: this.ipReport,

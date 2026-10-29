@@ -26,6 +26,12 @@ const BOUNDS: Record<keyof AdaptiveStyleParams, { min: number; max: number }> = 
   cooldownSecondsAfterLoss: { min: 0, max: 3600 },
   minAiConfidenceScore: { min: 0, max: 1 },
   minFeeHurdleMultiple: { min: 1, max: 10 },
+  // A floor below ~1.05x would let a book that is merely noisy pass as confirmation,
+  // and OBI above 0.6 does not occur in a top-20 book that is still liquid.
+  orderFlowMinObi: { min: 0.05, max: 0.6 },
+  orderFlowMinVolumeRatio: { min: 1.05, max: 3 },
+  orderFlowWindowSec: { min: 15, max: 300 },
+  orderFlowAbsorptionMultiple: { min: 1.1, max: 4 },
 };
 
 export interface StyleSanitizeResult {

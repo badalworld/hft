@@ -27,6 +27,7 @@ export const App: React.FC = () => {
     updateLocalAi,
     manualClosePosition,
     clearLogs,
+    setOrderFlowMode,
     addDirective,
     toggleDirective,
     addNote,
@@ -170,6 +171,7 @@ export const App: React.FC = () => {
         snapshot={snapshot}
         onClose={() => setAiClubOpen(false)}
         onUpdateLocalAi={updateLocalAi}
+        onSetOrderFlowMode={setOrderFlowMode}
         onAddDirective={addDirective}
         onToggleDirective={toggleDirective}
         onAddNote={addNote}

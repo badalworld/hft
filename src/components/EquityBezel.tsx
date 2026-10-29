@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { Lock, TrendingUp, Wallet, ShieldAlert } from 'lucide-react';
 import type { DashboardSnapshot } from '../types/hft';
 import { fmt6, fmtSigned6, fmtSignedUsd6, fmtUsd2, fmtUsd6 } from '../utils/format';
-import { SegmentDefs, SevenSegmentNumber, useConsoleGlyphHeight } from './SevenSegmentNumber';
+import { SevenSegmentNumber, useConsoleGlyphHeight } from './SevenSegmentNumber';
 
 interface EquityBezelProps {
   snapshot: DashboardSnapshot | null;
@@ -30,7 +30,6 @@ export const EquityBezel: React.FC<EquityBezelProps> = ({ snapshot }) => {
 
   return (
     <section className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-      <SegmentDefs />
       {/* 1. START BALANCE (Fixed on 1st Binance API Connection until Reset) */}
       <div className="skeuo-chassis relative rounded-2xl p-4 sm:p-5 lg:col-span-5">
         <div className="skeuo-screw !absolute top-2.5 left-2.5" />

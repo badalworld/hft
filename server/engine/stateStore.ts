@@ -8,6 +8,7 @@ import type {
   LocalDecisionConfig,
   OperatorDirective,
   OperatorNote,
+  OrderFlowMode,
   StyleMutationRecord,
   System1Weights,
   TradeLesson,
@@ -52,6 +53,7 @@ interface RawVaultData {
   startBalanceLocked: boolean;
   startBalanceLockedAt: number | null;
   boundLocalAddress: string | null;
+  orderFlowMode: OrderFlowMode;
   styleParams: AdaptiveStyleParams;
   system1Weights: System1Weights;
   localDecisionConfig: LocalDecisionConfig;
@@ -93,6 +95,7 @@ export class StateStore {
       startBalanceLocked: false,
       startBalanceLockedAt: null,
       boundLocalAddress: null,
+      orderFlowMode: 'shadow',
       styleParams: createDefaultStyleParams(),
       system1Weights: createDefaultSystem1Weights(),
       localDecisionConfig: {
@@ -164,6 +167,7 @@ export class StateStore {
       const merged: RawVaultData = {
         ...def,
         ...parsed,
+        orderFlowMode: parsed.orderFlowMode === 'enforce' ? 'enforce' : 'shadow',
         styleParams: { ...def.styleParams, ...(parsed.styleParams || {}) },
         system1Weights: { ...def.system1Weights, ...(parsed.system1Weights || {}) },
         localDecisionConfig: {
@@ -343,6 +347,15 @@ export class StateStore {
 
   public setBoundLocalAddress(addr: string | null) {
     this.data.boundLocalAddress = addr;
+    this.save();
+  }
+
+  public getOrderFlowMode(): OrderFlowMode {
+    return this.data.orderFlowMode;
+  }
+
+  public setOrderFlowMode(mode: OrderFlowMode) {
+    this.data.orderFlowMode = mode;
     this.save();
   }
 

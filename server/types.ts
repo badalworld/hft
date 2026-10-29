@@ -13,6 +13,7 @@ export interface LogEntry {
     | 'MONITOR_1S'
     | 'EXECUTION'
     | 'EXCHANGE_STOP'
+    | 'ORDER_FLOW'
     | 'AI_CLUB'
     | 'STATE'
     | 'NETWORK';
@@ -56,6 +57,86 @@ export type SignalStage =
   | 'IN_POSITION'
   | 'COOLDOWN';
 
+export interface OrderFlowSnapshot {
+  symbol: string;
+  windowSec: number;
+  samples: number;
+  buyUsd: number;
+  sellUsd: number;
+  buySellRatio: number;
+  cvdUsd: number;
+  cvdSlopeUsd: number;
+  cvdSlopePct: number;
+  priceChangePct: number;
+  windowHigh: number;
+  windowLow: number;
+  lastPrice: number;
+  buyAggressionMultiple: number;
+  sellAggressionMultiple: number;
+  updatedAt: number;
+}
+
+export interface OrderBookSnapshot {
+  symbol: string;
+  bid: number;
+  ask: number;
+  mid: number;
+  spreadBps: number;
+  obi: number;
+  bidDepthUsd: number;
+  askDepthUsd: number;
+  bidTouchUsd: number;
+  askTouchUsd: number;
+  bidRefillRatio: number;
+  askRefillRatio: number;
+  updatedAt: number;
+}
+
+export type OrderFlowVerdict =
+  | 'CONFIRM'
+  | 'NO_SIGNAL'
+  | 'NO_DATA'
+  | 'OBI_REJECT'
+  | 'CVD_REJECT'
+  | 'RATIO_REJECT'
+  | 'PRICE_REJECT'
+  | 'EXECUTION_REJECT'
+  | 'ABSORPTION_REJECT';
+
+export type OrderFlowMode = 'shadow' | 'enforce';
+
+/** What the order-flow layer has actually done since boot, for the console. */
+export interface OrderFlowTelemetry {
+  mode: OrderFlowMode;
+  confirmed: number;
+  blocked: number;
+  byVerdict: Record<string, number>;
+  /** Symbols with a live top-20 book right now. */
+  liveBooks: number;
+  /** Symbols subscribed to the book and tape feeds. */
+  watchedSymbols: number;
+  depthLive: boolean;
+  tapeLive: boolean;
+}
+
+export interface OrderFlowDecision {
+  verdict: OrderFlowVerdict;
+  side: 'LONG' | 'SHORT';
+  ok: boolean;
+  reasons: string[];
+  obi: number | null;
+  cvdUsd: number | null;
+  cvdSlopePct: number | null;
+  buySellRatio: number | null;
+  spreadBps: number | null;
+  /** Round-trip cost in ROI terms, including the measured spread. */
+  costRoiPct: number | null;
+  /** Expected 15s excursion in ROI terms, from ATR. */
+  expectedRoiPct: number | null;
+  absorption: 'NONE' | 'ABSORBED_SELLERS' | 'ABSORBED_BUYERS';
+  updatedAt: number;
+}
+
 export interface ScannerAsset {
   symbol: string;
   directionBucket: 'POSITIVE_TOP20' | 'NEGATIVE_TOP20';
@@ -73,6 +154,12 @@ export interface ScannerAsset {
   ema21: number;
   pullbackDepthPct: number;
   orderflowDeltaRatio: number;
+  obi: number | null;
+  cvd60sUsd: number | null;
+  buySellRatio60s: number | null;
+  spreadBps: number | null;
+  flowVerdict: OrderFlowVerdict;
+  flowReason: string;
   aiConfidence: number;
   recommendedLeverage: number;
   candleCount15s: number;
@@ -287,6 +374,10 @@ export interface AdaptiveStyleParams {
   cooldownSecondsAfterLoss: number;   // Per-symbol cooldown after loss
   minAiConfidenceScore: number;       // System-1 probability gate (0..1)
   minFeeHurdleMultiple: number;       // Expected 15s excursion must be this many round trips of taker fees
+  orderFlowMinObi: number;            // |OBI| a side must show before it can trade (0..1)
+  orderFlowMinVolumeRatio: number;    // Aggressive buy/sell notional ratio required on the leading side
+  orderFlowWindowSec: number;         // Rolling CVD / aggression window
+  orderFlowAbsorptionMultiple: number;// Aggression vs its own baseline before a move counts as absorbed
 }
 
 export type LocalDecisionProvider = 'builtin' | 'ollama_nimble' | 'laya_http' | 'kev_http';
@@ -519,6 +610,9 @@ export interface DashboardSnapshot {
   operatorDirectives: OperatorDirective[];
   /** Advisory briefings currently in front of the agents. */
   operatorNotes: OperatorNote[];
+
+  // Order Flow (CVD / OBI / absorption)
+  orderFlow: OrderFlowTelemetry;
 
   // API Rate & System Telemetry
   rateTelemetry: ApiRateTelemetry;

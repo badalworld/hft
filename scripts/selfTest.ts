@@ -7,6 +7,8 @@ import type {
   ClosedTradeRecord,
   OperatorDirective,
   OperatorDirectiveKind,
+  OrderBookSnapshot,
+  OrderFlowSnapshot,
 } from '../server/types.js';
 import type { BinanceFuturesRestClient } from '../server/binance/restClient.js';
 import type { BinanceWsStreamManager } from '../server/binance/wsStreamManager.js';
@@ -26,6 +28,9 @@ import { diagnoseLoss } from '../server/ai/lossAutopsy.js';
 import { buildTradeLesson } from '../server/ai/lessonMemory.js';
 import { createDefaultSystem1Weights } from '../server/ai/system1Primitives.js';
 import { MarketScanner40 } from '../server/engine/marketScanner.js';
+import { OrderBookTracker } from '../server/engine/orderBookTracker.js';
+import { OrderFlowTracker } from '../server/engine/orderFlowTracker.js';
+import { evaluateOrderFlow } from '../server/engine/orderFlowStrategy.js';
 import { buildPnlLedger } from '../server/engine/pnlLedger.js';
 import { PositionMonitor1s } from '../server/engine/positionMonitor1s.js';
 import { StateStore } from '../server/engine/stateStore.js';
@@ -464,6 +469,55 @@ async function runSelfTests() {
       'AGAINST',
       'a verdict that does not blame sizing let a maxLeverage rewrite pass its coherence seat'
     );
+    // Hermes owns the trailing family and also always occupies a panel seat. Building the
+    // panel as a set of [owner, hermes, peer] collapsed it to two seats for exactly those
+    // money parameters, turning "two of three" into "two of two" with no independent judge.
+    for (const param of [
+      'trailingTriggerRoiPct',
+      'trailingFloorRoiPct',
+      'trailingCallbackRoiPct',
+    ] as const) {
+      const b = ballotFor({
+        param,
+        target: councilParams[param] + 0.05,
+        min: -10,
+        max: 20,
+        reason: 'profit floor is giving back captured gains',
+      });
+      assert.equal(b.votes.length, 3, `${param} ballot did not seat three agents`);
+      assert.equal(
+        new Set(b.votes.map((v) => v.agent)).size,
+        3,
+        `${param} ballot seated the same agent twice`
+      );
+    }
+
+    // The order-flow thresholds are governed by the same council. OBI moves in 0.02
+    // stages, and the absorption multiple is inverted: demanding a bigger aggression
+    // multiple before calling a book absorbed means *fewer* blocks, i.e. looser.
+    const flowCtx: CouncilContext = { ...slippageCtx, rootCause: 'ADVERSE_TAKER_FLOW' };
+    const flowBallot = (
+      param: keyof AdaptiveStyleParams,
+      target: number,
+      min: number,
+      max: number
+    ) =>
+      castBallots([{ param, target, min, max, reason: 'tape leaned against the entry' }], flowCtx)[0];
+    assert.equal(
+      flowBallot('orderFlowMinObi', 0.22, 0.05, 0.6).approved,
+      true,
+      'a one-step OBI tightening was refused'
+    );
+    assert.equal(
+      flowBallot('orderFlowMinObi', 0.5, 0.05, 0.6).approved,
+      false,
+      'the OBI step cap did not hold'
+    );
+    assert.equal(
+      flowBallot('orderFlowAbsorptionMultiple', 1.7, 1.1, 4).approved,
+      false,
+      'raising the absorption multiple was scored as a tightening'
+    );
 
     console.log('7. Verifying cooldown swaps the scanner basket and PNL ledger maths...');
     const universe = Array.from({ length: 22 }, (_, i) => `S${String(i).padStart(2, '0')}USDT`);
@@ -882,6 +936,238 @@ async function runSelfTests() {
         assert.ok(!(key in asRecord), `light frame still carried ${key} as "${String(asRecord[key])}"`);
       }
       assert.equal(HEAVY_SNAPSHOT_KEYS.length, 5);
+    }
+
+    console.log('11. Verifying the order-flow layer (tape math, book imbalance, six-gate verdict)...');
+    {
+      // --- Tape: quote-denominated CVD, ratio, slope and aggression from real bucket math.
+      const tape = new OrderFlowTracker();
+      const tNow = Date.now();
+      tape.ingest('TESTUSDT', 100, 1, tNow - 90_000, false); // $100 buy in the *previous* window
+      tape.ingest('TESTUSDT', 100, 10, tNow - 15_000, false); // $1,000 aggressive buy
+      tape.ingest('TESTUSDT', 100, 4, tNow - 14_000, true); // $400 aggressive sell
+      const tapeSnap = tape.getSnapshot('TESTUSDT', 60);
+      assert.ok(tapeSnap, 'the tracker dropped a populated tape');
+      assert.equal(tapeSnap.samples, 2, 'the prior-window bucket leaked into the current samples');
+      assert.equal(tapeSnap.buyUsd, 1000);
+      assert.equal(tapeSnap.sellUsd, 400);
+      assert.ok(Math.abs(tapeSnap.buySellRatio - 2.5) < 1e-6);
+      assert.equal(tapeSnap.cvdUsd, 600);
+      assert.equal(tapeSnap.cvdSlopeUsd, 600, 'both buckets are in the modern half, so the slope is the delta');
+      assert.ok(
+        Math.abs(tapeSnap.buyAggressionMultiple - 10) < 1e-6,
+        'aggression must be measured against the previous window, not the current one'
+      );
+
+      // A late taker sell must flip both the delta and its slope — the fade the gate refuses.
+      tape.ingest('TESTUSDT', 100, 10, tNow - 5_000, true);
+      const flipped = tape.getSnapshot('TESTUSDT', 60);
+      assert.ok(flipped);
+      assert.equal(flipped.cvdUsd, -400);
+      assert.equal(flipped.cvdSlopeUsd, -400);
+      assert.equal(flipped.priceChangePct, 0);
+
+      // --- Book: distance-weighted OBI over top-20, spread in bps, touch-refill baseline.
+      const books = new OrderBookTracker();
+      const bookTs = Date.now();
+      books.ingest('TESTUSDT', [[100, 10], [99.9, 10]], [[100.1, 1], [100.2, 1]], bookTs);
+      const heavyBid = books.getSnapshot('TESTUSDT');
+      assert.ok(heavyBid, 'the book tracker dropped an ingested frame');
+      assert.ok(heavyBid.obi > 0.8, `bid-heavy book read OBI ${heavyBid.obi}`);
+      assert.ok(Math.abs(heavyBid.spreadBps - 10) < 0.1, `spread read ${heavyBid.spreadBps} bps`);
+      assert.equal(heavyBid.bidRefillRatio, 1, 'the first frame must baseline its own refill ratio');
+
+      books.ingest('MIRRORUSDT', [[100, 1], [99.9, 1]], [[100.1, 10], [100.2, 10]], bookTs);
+      const heavyAsk = books.getSnapshot('MIRRORUSDT');
+      assert.ok(heavyAsk && heavyAsk.obi < -0.8);
+      // The 0.1 tick means the two books are only near-mirrors, hence the loose bound.
+      assert.ok(Math.abs(heavyAsk.obi + heavyBid.obi) < 1e-2, 'OBI is not symmetric for a mirrored book');
+
+      // Size returning to the touch against an unchanged ask is what "refilled" means.
+      books.ingest('TESTUSDT', [[100, 20], [99.9, 20]], [[100.1, 1], [100.2, 1]], bookTs + 500);
+      const refilled = books.getSnapshot('TESTUSDT');
+      assert.ok(refilled);
+      assert.ok(refilled.bidRefillRatio > 1.8, `refill read ${refilled.bidRefillRatio}`);
+      assert.ok(Math.abs(refilled.askRefillRatio - 1) < 1e-9);
+
+      // --- The gate itself.
+      const flowParams = {
+        orderFlowMinObi: 0.2,
+        orderFlowMinVolumeRatio: 1.5,
+        orderFlowAbsorptionMultiple: 1.6,
+        minFeeHurdleMultiple: 2,
+      };
+      const bookSnap = (
+        obi: number,
+        spreadBps = 2,
+        askRefillRatio = 1,
+        bidRefillRatio = 1
+      ): OrderBookSnapshot => ({
+        symbol: 'TESTUSDT',
+        bid: 100,
+        ask: 100.02,
+        mid: 100.01,
+        spreadBps,
+        obi,
+        bidDepthUsd: 50_000,
+        askDepthUsd: 50_000,
+        bidTouchUsd: 10_000,
+        askTouchUsd: 10_000,
+        bidRefillRatio,
+        askRefillRatio,
+        updatedAt: Date.now(),
+      });
+      const flowSnap = (over: Partial<OrderFlowSnapshot> = {}): OrderFlowSnapshot => ({
+        symbol: 'TESTUSDT',
+        windowSec: 60,
+        samples: 20,
+        buyUsd: 6000,
+        sellUsd: 2000,
+        buySellRatio: 3,
+        cvdUsd: 4000,
+        cvdSlopeUsd: 1500,
+        cvdSlopePct: 1500 / 8000,
+        priceChangePct: 0.3,
+        windowHigh: 101,
+        windowLow: 99,
+        lastPrice: 100.8,
+        buyAggressionMultiple: 1.1,
+        sellAggressionMultiple: 1.1,
+        updatedAt: Date.now(),
+        ...over,
+      });
+      const shortFlow = flowSnap({
+        buyUsd: 2000,
+        sellUsd: 6000,
+        buySellRatio: 0.4,
+        cvdUsd: -4000,
+        cvdSlopeUsd: -1500,
+        cvdSlopePct: -1500 / 8000,
+        priceChangePct: -0.3,
+        lastPrice: 99.2,
+      });
+
+      const longOk = evaluateOrderFlow({ side: 'LONG', book: bookSnap(0.35), flow: flowSnap(), params: flowParams });
+      assert.equal(longOk.verdict, 'CONFIRM', longOk.reasons.join('; '));
+      assert.equal(longOk.ok, true);
+      assert.equal(longOk.obi, 0.35);
+
+      const shortOk = evaluateOrderFlow({ side: 'SHORT', book: bookSnap(-0.35), flow: shortFlow, params: flowParams });
+      assert.equal(shortOk.verdict, 'CONFIRM', shortOk.reasons.join('; '));
+      assert.equal(shortOk.ok, true);
+
+      assert.equal(
+        evaluateOrderFlow({ side: 'LONG', book: null, flow: flowSnap(), params: flowParams }).verdict,
+        'NO_DATA'
+      );
+      const stale = evaluateOrderFlow({
+        side: 'LONG',
+        book: { ...bookSnap(0.35), updatedAt: Date.now() - 6000 },
+        flow: flowSnap(),
+        params: flowParams,
+      });
+      assert.equal(stale.verdict, 'NO_DATA');
+      assert.equal(stale.spreadBps, 2, 'the stale verdict dropped the measured spread');
+
+      assert.equal(
+        evaluateOrderFlow({ side: 'LONG', book: bookSnap(0.35), flow: flowSnap({ samples: 2 }), params: flowParams })
+          .verdict,
+        'NO_SIGNAL'
+      );
+      assert.equal(
+        evaluateOrderFlow({ side: 'LONG', book: bookSnap(0.35), flow: null, params: flowParams }).verdict,
+        'NO_SIGNAL'
+      );
+
+      // Gate order: affordability is checked before the book, because data costs nothing
+      // and an unaffordable entry is a loss regardless of how the book leans.
+      const cost = evaluateOrderFlow({
+        side: 'LONG',
+        book: bookSnap(0.0, 10),
+        flow: flowSnap(),
+        params: flowParams,
+        expectedRoiPct: 3,
+        leverage: 10,
+        takerFeeRate: 0.0005,
+      });
+      assert.equal(cost.verdict, 'EXECUTION_REJECT');
+      assert.ok(cost.costRoiPct !== null && Math.abs(cost.costRoiPct - 2) < 1e-9, `cost read ${cost.costRoiPct}`);
+      // fees are linear in leverage, so the same trade at 2x leverage has the same ratio.
+      assert.equal(
+        evaluateOrderFlow({
+          side: 'LONG',
+          book: bookSnap(0.35, 10),
+          flow: flowSnap(),
+          params: flowParams,
+          expectedRoiPct: 9,
+          leverage: 20,
+          takerFeeRate: 0.0005,
+        }).verdict,
+        'CONFIRM'
+      );
+
+      assert.equal(
+        evaluateOrderFlow({ side: 'LONG', book: bookSnap(0.19), flow: flowSnap(), params: flowParams }).verdict,
+        'OBI_REJECT'
+      );
+      assert.equal(
+        evaluateOrderFlow({ side: 'SHORT', book: bookSnap(-0.19), flow: shortFlow, params: flowParams }).verdict,
+        'OBI_REJECT'
+      );
+      assert.equal(
+        evaluateOrderFlow({
+          side: 'LONG',
+          book: bookSnap(0.35),
+          flow: flowSnap({ cvdSlopeUsd: -100 }),
+          params: flowParams,
+        }).verdict,
+        'CVD_REJECT'
+      );
+      assert.equal(
+        evaluateOrderFlow({
+          side: 'LONG',
+          book: bookSnap(0.35),
+          flow: flowSnap({ buyUsd: 6000, sellUsd: 5000, buySellRatio: 1.2, cvdUsd: 1000 }),
+          params: flowParams,
+        }).verdict,
+        'RATIO_REJECT'
+      );
+      assert.equal(
+        evaluateOrderFlow({ side: 'LONG', book: bookSnap(0.35), flow: flowSnap({ lastPrice: 99.2 }), params: flowParams })
+          .verdict,
+        'PRICE_REJECT'
+      );
+      assert.equal(
+        evaluateOrderFlow({ side: 'SHORT', book: bookSnap(-0.35), flow: shortFlow, params: flowParams }).ok,
+        true
+      );
+
+      // Aggressive buying that the ask keeps absorbing, with price going nowhere, is the
+      // exhaustion print this layer exists to refuse — on both sides.
+      const absorbedLong = evaluateOrderFlow({
+        side: 'LONG',
+        book: bookSnap(0.35, 2, 1.9),
+        flow: flowSnap({ buyAggressionMultiple: 2.0, priceChangePct: 0.01 }),
+        params: flowParams,
+      });
+      assert.equal(absorbedLong.verdict, 'ABSORPTION_REJECT');
+      assert.equal(absorbedLong.absorption, 'ABSORBED_BUYERS');
+      const absorbedShort = evaluateOrderFlow({
+        side: 'SHORT',
+        book: bookSnap(-0.35, 2, 1, 1.9),
+        flow: { ...shortFlow, priceChangePct: 0.01, sellAggressionMultiple: 2.0 },
+        params: flowParams,
+      });
+      assert.equal(absorbedShort.verdict, 'ABSORPTION_REJECT');
+      assert.equal(absorbedShort.absorption, 'ABSORBED_SELLERS');
+
+      // --- Mode: shadow is the resting state, and enforce has to survive a restart.
+      const modeStore = new StateStore();
+      assert.equal(modeStore.getOrderFlowMode(), 'shadow', 'the layer must ship shadow-first');
+      modeStore.setOrderFlowMode('enforce');
+      assert.equal(new StateStore().getOrderFlowMode(), 'enforce', 'the mode did not persist');
+      modeStore.setOrderFlowMode('shadow');
+      assert.equal(new StateStore().getOrderFlowMode(), 'shadow');
     }
 
     console.log('✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!');

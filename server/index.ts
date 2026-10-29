@@ -97,6 +97,15 @@ async function startServer() {
     res.json({ ok: true, snapshot: engine.getSnapshot() });
   });
 
+  app.post('/api/settings/order-flow-mode', (req, res) => {
+    const out = engine.setOrderFlowMode(String(req.body?.mode ?? ''));
+    if (!out.ok) {
+      res.status(400).json({ ...out, snapshot: engine.getSnapshot() });
+      return;
+    }
+    res.json({ ...out, snapshot: engine.getSnapshot() });
+  });
+
   app.post('/api/settings/style-params', (req, res) => {
     const out = engine.updateStyleParams(req.body || {});
     if (out.accepted.length === 0 && out.rejected.length > 0) {

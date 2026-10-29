@@ -30,6 +30,24 @@ export function fmtUsd6(val: number | string | null | undefined): string {
   return `$${n.toFixed(6)}`;
 }
 
+/** Order-book imbalance lives between -1 and 1; four decimals is its whole signal. */
+export function fmtSigned4(val: number | null | undefined): string {
+  const n = Number(val ?? 0);
+  if (!Number.isFinite(n)) return '0.0000';
+  return `${n >= 0 ? '+' : ''}${n.toFixed(4)}`;
+}
+
+/** Tape delta moves thousands of dollars a minute; the scanner column reads in k/M. */
+export function fmtCompactUsd(val: number | null | undefined): string {
+  const n = Number(val ?? 0);
+  if (!Number.isFinite(n)) return '$0';
+  const sign = n < 0 ? '-' : '+';
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(1)}k`;
+  return `${sign}$${abs.toFixed(0)}`;
+}
+
 export function fmtSignedUsd6(val: number | string | null | undefined): string {
   const n = typeof val === 'string' ? parseFloat(val) : Number(val ?? 0);
   if (!Number.isFinite(n)) return '+$0.000000';

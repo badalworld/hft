@@ -41,6 +41,10 @@ const PARAM_OWNER: Record<string, string> = {
   minConfirmationBodyRatio: 'microstructure-sniper',
   pullbackRsiLongMax: 'microstructure-sniper',
   pullbackRsiShortMin: 'microstructure-sniper',
+  orderFlowMinObi: 'microstructure-sniper',
+  orderFlowMinVolumeRatio: 'microstructure-sniper',
+  orderFlowWindowSec: 'microstructure-sniper',
+  orderFlowAbsorptionMultiple: 'microstructure-sniper',
   minAiConfidenceScore: 'system1-judge',
   baseMarginUsd: 'leverage-architect',
   minLeverage: 'leverage-architect',
@@ -74,6 +78,12 @@ const HIGHER_IS_TIGHTER: Record<string, boolean> = {
   minFeeHurdleMultiple: true,
   minOrderflowDeltaRatio: true,
   minConfirmationBodyRatio: true,
+  orderFlowMinObi: true,
+  orderFlowMinVolumeRatio: true,
+  orderFlowWindowSec: true,
+  // Absorption is a *block*, so demanding a larger aggression multiple before calling a
+  // book absorbed means fewer blocks — a looser stance, not a stricter one.
+  orderFlowAbsorptionMultiple: false,
   pullbackRsiLongMax: false,
   pullbackRsiShortMin: true,
   minAiConfidenceScore: true,
@@ -94,6 +104,10 @@ const MAX_STEP: Record<string, number> = {
   pullbackRsiLongMax: 1.5,
   pullbackRsiShortMin: 1.5,
   minAiConfidenceScore: 0.02,
+  orderFlowMinObi: 0.02,
+  orderFlowMinVolumeRatio: 0.05,
+  orderFlowWindowSec: 5,
+  orderFlowAbsorptionMultiple: 0.1,
   trailingCallbackRoiPct: 0.15,
   trailingFloorRoiPct: 0.2,
   trailingTriggerRoiPct: 0.5,
@@ -151,6 +165,8 @@ const AUTOPSY_PARAMS: Record<string, string[]> = {
     'minConfirmationBodyRatio',
     'pullbackRsiLongMax',
     'pullbackRsiShortMin',
+    'orderFlowMinVolumeRatio',
+    'orderFlowMinObi',
   ],
   ENTRY_TOO_EARLY: [
     'minOrderflowDeltaRatio',
@@ -158,6 +174,7 @@ const AUTOPSY_PARAMS: Record<string, string[]> = {
     'pullbackRsiLongMax',
     'pullbackRsiShortMin',
     'minAiConfidenceScore',
+    'orderFlowWindowSec',
   ],
   REGIME_FADED: [
     'max24hOverextensionPct',
@@ -308,8 +325,14 @@ export function castBallots(
 ): Ballot[] {
   return proposals.map((prop) => {
     const owner = PARAM_OWNER[prop.param] ?? 'hermes-evolver';
-    const peer = owner === 'system1-judge' ? 'leverage-architect' : 'system1-judge';
-    const seats = Array.from(new Set([owner, 'hermes-evolver', peer]));
+    // Hermes is always on the panel, so when Hermes *owns* the parameter the peer
+    // cannot be Hermes again — that collapsed the panel to two seats and turned
+    // "two of three" into "two of two" for every trailing-stop parameter. In that
+    // case the panel is Hermes plus two independent judges instead.
+    const seats =
+      owner === 'hermes-evolver'
+        ? ['hermes-evolver', 'system1-judge', 'leverage-architect']
+        : Array.from(new Set([owner, 'hermes-evolver', owner === 'system1-judge' ? 'leverage-architect' : 'system1-judge']));
     const votes = seats.map((id) => voteBy(id, prop, ctx));
     const forCount = votes.filter((v) => v.vote === 'FOR').length;
     const before = ctx.params[prop.param];

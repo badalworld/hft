@@ -29,5 +29,8 @@ export type {
   ServerIpReport,
   ApiRateTelemetry,
   ScannerOperatingState,
+  OrderFlowVerdict,
+  OrderFlowMode,
+  OrderFlowTelemetry,
   DashboardSnapshot,
 } from '../../server/types';

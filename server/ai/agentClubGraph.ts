@@ -52,6 +52,10 @@ export function createDefaultStyleParams(): AdaptiveStyleParams {
     cooldownSecondsAfterLoss: 120,
     minAiConfidenceScore: 0.56,
     minFeeHurdleMultiple: 2.0,
+    orderFlowMinObi: 0.2,
+    orderFlowMinVolumeRatio: 1.5,
+    orderFlowWindowSec: 60,
+    orderFlowAbsorptionMultiple: 1.6,
   };
 }
 
@@ -682,6 +686,13 @@ export class AiAgentClubOrchestrator {
                 )}x at RSI ${f6(
                   state.features.rsi15s
                 )} was exhaustion print, not conviction — require a closed body`
+              );
+              propose(
+                'orderFlowMinVolumeRatio',
+                p.orderFlowMinVolumeRatio + 0.05,
+                1.2,
+                2.5,
+                'Taker flow leaned against the entry — demand a bigger measured imbalance in the 60s tape'
               );
               rsiReset();
               break;

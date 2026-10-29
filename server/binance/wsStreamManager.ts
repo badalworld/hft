@@ -15,19 +15,37 @@ export interface Ticker24hStreamItem {
   quoteVolume: number;
 }
 
+export type DepthBookFrame = {
+  symbol: string;
+  bids: Array<[number, number]>;
+  asks: Array<[number, number]>;
+  eventTimeMs: number;
+};
+
+export type AggTradeFrame = {
+  symbol: string;
+  price: number;
+  qty: number;
+  tradeTimeMs: number;
+  isBuyerMaker: boolean;
+};
+
 export class BinanceWsStreamManager {
   private marketWs: WebSocket | null = null;
   private aggTradeWs: WebSocket | null = null;
+  private depthWs: WebSocket | null = null;
   private userWs: WebSocket | null = null;
 
   private subscribedAggSymbols = new Set<string>();
   private desiredAggSymbols = new Set<string>();
+  private subscribedDepthSymbols = new Set<string>();
   private markPrices = new Map<string, number>();
   private lastPrices = new Map<string, number>();
 
   private running = false;
   private marketReconnectTimer: NodeJS.Timeout | null = null;
   private aggReconnectTimer: NodeJS.Timeout | null = null;
+  private depthReconnectTimer: NodeJS.Timeout | null = null;
   private userReconnectTimer: NodeJS.Timeout | null = null;
   private listenKeyKeepaliveTimer: NodeJS.Timeout | null = null;
   private reqIdCounter = 1;
@@ -36,6 +54,8 @@ export class BinanceWsStreamManager {
   private onTickerBatchCb: ((items: Ticker24hStreamItem[]) => void) | null = null;
   private onMarkPriceTickCb: ((markMap: Map<string, number>) => void) | null = null;
   private onAccountUpdateCb: (() => void) | null = null;
+  private onAggTradeCb: ((frame: AggTradeFrame) => void) | null = null;
+  private onDepthBookCb: ((frame: DepthBookFrame) => void) | null = null;
 
   // A blackholed edge completes the TLS upgrade and even ACKs SUBSCRIBE, then
   // never sends a frame. Such a socket emits neither 'close' nor 'error', so
@@ -43,14 +63,19 @@ export class BinanceWsStreamManager {
   // the engine sits on frozen prices while reporting "connected".
   private lastMarketFrameAt = 0;
   private lastAggFrameAt = 0;
+  private lastDepthFrameAt = 0;
   private staleWatchdogTimer: NodeJS.Timeout | null = null;
   private marketStaleStrikes = 0;
   private aggStaleStrikes = 0;
+  private depthStaleStrikes = 0;
 
   // !markPrice@arr@1s publishes every second and the agg basket spans 40 liquid
   // symbols, so silence well past these windows means the feed is dead.
   private static readonly MARKET_STALE_MS = 15_000;
   private static readonly AGG_STALE_MS = 25_000;
+  // depth20@500ms is the fastest feed in the set, so a few quiet seconds on an
+  // illiquid symbol must not kill a socket that is working for 39 others.
+  private static readonly DEPTH_STALE_MS = 12_000;
 
   constructor(
     private readonly rateGovernor: BinanceRateGovernor,
@@ -74,6 +99,22 @@ export class BinanceWsStreamManager {
     this.onAccountUpdateCb = cb;
   }
 
+  public onAggTrade(cb: (frame: AggTradeFrame) => void) {
+    this.onAggTradeCb = cb;
+  }
+
+  public onDepthBook(cb: (frame: DepthBookFrame) => void) {
+    this.onDepthBookCb = cb;
+  }
+
+  public isDepthDataLive(): boolean {
+    return Date.now() - this.lastDepthFrameAt < BinanceWsStreamManager.DEPTH_STALE_MS;
+  }
+
+  public getWatchedSymbolCount(): number {
+    return this.desiredAggSymbols.size;
+  }
+
   public getMarkPrice(symbol: string): number | undefined {
     return this.markPrices.get(symbol);
   }
@@ -87,6 +128,7 @@ export class BinanceWsStreamManager {
     this.running = true;
     this.connectMarketWs();
     this.connectAggTradeWs();
+    this.connectDepthWs();
     this.startStaleWatchdog();
   }
 
@@ -152,6 +194,21 @@ export class BinanceWsStreamManager {
           this.terminateSocket(this.aggTradeWs);
         }
       }
+
+      if (this.depthWs?.readyState === WebSocket.OPEN) {
+        if (now - this.lastDepthFrameAt > BinanceWsStreamManager.DEPTH_STALE_MS) {
+          this.depthStaleStrikes++;
+          if (this.depthStaleStrikes <= 3 || this.depthStaleStrikes % 20 === 0) {
+            logger.warn(
+              'ORDER_FLOW',
+              `depth WS is open but silent for ${Math.round(
+                (now - this.lastDepthFrameAt) / 1000
+              )}s — dropping it to rotate onto another fstream edge (strike ${this.depthStaleStrikes}).`
+            );
+          }
+          this.terminateSocket(this.depthWs);
+        }
+      }
     }, 5000);
   }
 
@@ -207,6 +264,10 @@ export class BinanceWsStreamManager {
       clearTimeout(this.aggReconnectTimer);
       this.aggReconnectTimer = null;
     }
+    if (this.depthReconnectTimer) {
+      clearTimeout(this.depthReconnectTimer);
+      this.depthReconnectTimer = null;
+    }
     if (this.marketWs) {
       try {
         this.marketWs.removeAllListeners();
@@ -225,15 +286,27 @@ export class BinanceWsStreamManager {
       }
       this.aggTradeWs = null;
     }
+    if (this.depthWs) {
+      try {
+        this.depthWs.removeAllListeners();
+        this.depthWs.close();
+      } catch {
+        // ignore
+      }
+      this.depthWs = null;
+    }
     this.subscribedAggSymbols.clear();
+    this.subscribedDepthSymbols.clear();
     this.rateGovernor.wsConnected = false;
     this.rateGovernor.wsStreamsCount = 0;
   }
 
+  /** One watched set drives both the tape socket and the book socket. */
   public updateWatchedAggTradeSymbols(symbols: string[]) {
     const nextSet = new Set(symbols.map((s) => s.toUpperCase()));
     this.desiredAggSymbols = nextSet;
     this.syncAggSubscriptions();
+    this.syncDepthSubscriptions();
   }
 
   private wsOptions(): WebSocket.ClientOptions {
@@ -418,6 +491,9 @@ export class BinanceWsStreamManager {
             const isBuyerMaker = Boolean(data.m);
             this.lastPrices.set(data.s, price);
             this.candleBuilder.ingestAggTrade(data.s, price, qty, tradeTime, isBuyerMaker, true);
+            if (this.onAggTradeCb) {
+              this.onAggTradeCb({ symbol: data.s, price, qty, tradeTimeMs: tradeTime, isBuyerMaker });
+            }
           }
         } catch {
           // ignore
@@ -488,6 +564,123 @@ export class BinanceWsStreamManager {
     this.updateStreamCount();
   }
 
+  private connectDepthWs() {
+    if (!this.running) return;
+    const url = 'wss://fstream.binance.com/ws';
+
+    try {
+      const ws = new WebSocket(url, this.wsOptions());
+      this.depthWs = ws;
+      this.subscribedDepthSymbols.clear();
+
+      ws.on('open', () => {
+        this.lastDepthFrameAt = Date.now();
+        logger.info(
+          'ORDER_FLOW',
+          'depth20@500ms WS handshake complete — subscribing top-20 book basket.'
+        );
+        this.syncDepthSubscriptions();
+      });
+
+      ws.on('message', (raw: WebSocket.RawData) => {
+        try {
+          const data = JSON.parse(raw.toString());
+          if (data?.e === 'depthUpdate' && data.s && Array.isArray(data.b) && Array.isArray(data.a)) {
+            if (this.depthStaleStrikes > 0) {
+              this.depthStaleStrikes = 0;
+              logger.success('ORDER_FLOW', 'depth WS is delivering live book again.');
+            }
+            const eventTimeMs = Number(data.T) || Number(data.E) || Date.now();
+            this.lastDepthFrameAt = Date.now();
+            if (this.onDepthBookCb) {
+              this.onDepthBookCb({
+                symbol: data.s,
+                bids: this.parseLevels(data.b),
+                asks: this.parseLevels(data.a),
+                eventTimeMs,
+              });
+            }
+          }
+        } catch {
+          // ignore
+        }
+      });
+
+      ws.on('ping', (data) => {
+        try {
+          ws.pong(data);
+        } catch {
+          // ignore
+        }
+      });
+
+      ws.on('close', () => {
+        this.subscribedDepthSymbols.clear();
+        this.updateStreamCount();
+        this.scheduleDepthReconnect();
+      });
+
+      ws.on('error', (err) => {
+        logger.warn('ORDER_FLOW', `depth WS error: ${err.message}`);
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+      });
+    } catch {
+      this.scheduleDepthReconnect();
+    }
+  }
+
+  private parseLevels(rows: unknown[]): Array<[number, number]> {
+    const out: Array<[number, number]> = [];
+    for (const row of rows) {
+      if (!Array.isArray(row) || row.length < 2) continue;
+      const price = parseFloat(String(row[0]));
+      const qty = parseFloat(String(row[1]));
+      if (price > 0 && qty >= 0) out.push([price, qty]);
+    }
+    return out;
+  }
+
+  private scheduleDepthReconnect() {
+    if (!this.running || this.depthReconnectTimer) return;
+    this.depthReconnectTimer = setTimeout(() => {
+      this.depthReconnectTimer = null;
+      this.connectDepthWs();
+    }, 6000);
+  }
+
+  private syncDepthSubscriptions() {
+    if (!this.depthWs || this.depthWs.readyState !== WebSocket.OPEN) return;
+
+    const toSub: string[] = [];
+    const toUnsub: string[] = [];
+
+    for (const sym of this.desiredAggSymbols) {
+      if (!this.subscribedDepthSymbols.has(sym)) {
+        toSub.push(`${sym.toLowerCase()}@depth20@500ms`);
+        this.subscribedDepthSymbols.add(sym);
+      }
+    }
+
+    for (const sym of Array.from(this.subscribedDepthSymbols)) {
+      if (!this.desiredAggSymbols.has(sym)) {
+        toUnsub.push(`${sym.toLowerCase()}@depth20@500ms`);
+        this.subscribedDepthSymbols.delete(sym);
+      }
+    }
+
+    if (toUnsub.length > 0) {
+      this.sendWsCommand(this.depthWs, 'UNSUBSCRIBE', toUnsub);
+    }
+    if (toSub.length > 0) {
+      this.sendWsCommand(this.depthWs, 'SUBSCRIBE', toSub);
+    }
+    this.updateStreamCount();
+  }
+
   private sendWsCommand(ws: WebSocket, method: 'SUBSCRIBE' | 'UNSUBSCRIBE', params: string[]) {
     try {
       ws.send(
@@ -505,7 +698,8 @@ export class BinanceWsStreamManager {
   private updateStreamCount() {
     const base = this.rateGovernor.wsConnected ? 2 : 0;
     const user = this.rateGovernor.userDataStreamConnected ? 1 : 0;
-    this.rateGovernor.wsStreamsCount = base + user + this.subscribedAggSymbols.size;
+    this.rateGovernor.wsStreamsCount =
+      base + user + this.subscribedAggSymbols.size + this.subscribedDepthSymbols.size;
   }
 
   private async connectUserWs() {
