@@ -87,6 +87,25 @@ function normalizeFeatures(
   return { xRsi, xPullback, xDelta, xBody, xWick, xMom24h, xVol };
 }
 
+/** Calibrated probability for one feature vector — the exact value the entry graph gates on. */
+export function scoreFeatures(
+  side: 'LONG' | 'SHORT',
+  features: EntryFeatureVector,
+  weights: System1Weights
+): number {
+  const norm = normalizeFeatures(side, features);
+  const logit =
+    weights.bias +
+    weights.rsiAlignment * norm.xRsi +
+    weights.pullbackQuality * norm.xPullback +
+    weights.orderflowDelta * norm.xDelta +
+    weights.candleConviction * norm.xBody +
+    weights.wickRejection * norm.xWick +
+    weights.momentum24hSweetSpot * norm.xMom24h +
+    weights.volatilityHealth * norm.xVol;
+  return sigmoid(logit / clamp(weights.temperature, 0.5, 2.5));
+}
+
 // Structural maxima of normalizeFeatures(): momentum tops out at 0.75 and volatility
 // at 0.65, the other five at 1. Any gate above the score this ceiling implies can never
 // be met, no matter how perfect the tape is.
@@ -114,22 +133,104 @@ export function attainableSystem1Score(weights: System1Weights): number {
   return sigmoid(maxLogit / clamp(weights.temperature, 0.5, 2.5));
 }
 
+export interface EmpiricalGateStats {
+  n: number;
+  p95: number | null;
+}
+
+export type GateSource = 'configured' | 'ceiling' | 'observed';
+
+export interface ResolvedGate {
+  threshold: number;
+  ceiling: number;
+  clamped: boolean;
+  source: GateSource;
+  observedN: number;
+  observedP95: number | null;
+}
+
+/** Below this many observations the window is a warm-up, not a distribution. */
+const EMPIRICAL_MIN_SAMPLES = 40;
+/** Even when the tape's best candidates score lower, the judge never asks less than this. */
+const EMPIRICAL_FLOOR = 0.55;
+const EMPIRICAL_QUANTILE = 0.95;
+
 /**
- * A threshold above the model's attainable ceiling is not a risk control, it is an
- * outage: the learner shrinks feature weights and raises temperature after losses while
- * the council ratchets the threshold up, so without this coupling the two loops can
- * cross and freeze every entry. The configured value stays authoritative until it
- * becomes physically unreachable; then it is held one point below the ceiling.
+ * Rolling distribution of the scores the judge actually emits. The structural ceiling
+ * assumes every feature maxes out simultaneously; real feature mixes never get there,
+ * so the observed range is the only honest measure of what the gate can admit.
+ */
+export class EmpiricalScoreWindow {
+  private samples: number[] = [];
+
+  constructor(private readonly capacity = 240) {}
+
+  public record(score: number) {
+    if (!Number.isFinite(score)) return;
+    this.samples.push(clamp(score, 0, 1));
+    if (this.samples.length > this.capacity) this.samples.shift();
+  }
+
+  public seed(scores: number[]) {
+    this.samples = [];
+    for (const s of scores.slice(-this.capacity)) this.record(s);
+  }
+
+  public get size() {
+    return this.samples.length;
+  }
+
+  public quantile(q: number): number | null {
+    if (this.samples.length === 0) return null;
+    const sorted = [...this.samples].sort((a, b) => a - b);
+    const rank = Math.max(
+      0,
+      Math.min(sorted.length - 1, Math.ceil(clamp(q, 0, 1) * sorted.length) - 1)
+    );
+    return sorted[rank];
+  }
+
+  public stats(): EmpiricalGateStats {
+    return { n: this.samples.length, p95: this.quantile(EMPIRICAL_QUANTILE) };
+  }
+}
+
+/**
+ * A threshold the model cannot reach is an outage, not a risk control: the learner
+ * shrinks feature weights and raises temperature after losses while the council ratchets
+ * the threshold up, so without this coupling the two loops cross and freeze every entry.
+ * Two locks keep the gate inside the model's real range — the structural ceiling (every
+ * feature at its cap at once) and, once enough candidates have been scored, their p95.
+ * The empirical gate is the top 5% of what the market is actually offering, never below
+ * 0.55, and it only ever lowers the configured value; it can never raise it.
  */
 export function resolveReachableThreshold(
   configured: number,
-  weights: System1Weights
-): { threshold: number; ceiling: number; clamped: boolean } {
+  weights: System1Weights,
+  observed: EmpiricalGateStats | null = null
+): ResolvedGate {
   const ceiling = attainableSystem1Score(weights);
-  const reachable = Math.max(0, ceiling - 0.01);
-  return configured > reachable
-    ? { threshold: reachable, ceiling, clamped: true }
-    : { threshold: configured, ceiling, clamped: false };
+  const structural = Math.max(0, ceiling - 0.01);
+  let threshold = Math.min(configured, structural);
+  let source: GateSource = configured > structural ? 'ceiling' : 'configured';
+
+  const observedP95 = observed?.p95 ?? null;
+  if (observed && observed.n >= EMPIRICAL_MIN_SAMPLES && observedP95 !== null) {
+    const empirical = Math.max(EMPIRICAL_FLOOR, observedP95);
+    if (empirical < threshold) {
+      threshold = empirical;
+      source = 'observed';
+    }
+  }
+
+  return {
+    threshold,
+    ceiling,
+    clamped: threshold < configured,
+    source,
+    observedN: observed?.n ?? 0,
+    observedP95,
+  };
 }
 
 export class System1DecisionEngine {
@@ -171,20 +272,7 @@ export class System1DecisionEngine {
       config,
     } = params;
 
-    const norm = normalizeFeatures(side, features);
-
-    const logit =
-      weights.bias +
-      weights.rsiAlignment * norm.xRsi +
-      weights.pullbackQuality * norm.xPullback +
-      weights.orderflowDelta * norm.xDelta +
-      weights.candleConviction * norm.xBody +
-      weights.wickRejection * norm.xWick +
-      weights.momentum24hSweetSpot * norm.xMom24h +
-      weights.volatilityHealth * norm.xVol;
-
-    const temp = clamp(weights.temperature, 0.5, 2.5);
-    let prob = sigmoid(logit / temp);
+    let prob = scoreFeatures(side, features, weights);
     let source = 'builtin-system1-rlcd';
 
     // Optional Zero-Cost Local Nimble / Laya / Kev HTTP forward pass (<140ms budget for HFT)

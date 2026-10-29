@@ -14,7 +14,11 @@ import type {
   System1Weights,
   TradeLesson,
 } from '../types.js';
-import { System1DecisionEngine, resolveReachableThreshold } from './system1Primitives.js';
+import {
+  EmpiricalScoreWindow,
+  System1DecisionEngine,
+  resolveReachableThreshold,
+} from './system1Primitives.js';
 import {
   aggregateLessonPatterns,
   buildTradeLesson,
@@ -177,6 +181,8 @@ export class AiAgentClubOrchestrator {
   private lessons: TradeLesson[];
   /** Free-text briefings from the operator. Advisory: quoted into reasoning, never a gate. */
   private operatorNotes: OperatorNote[];
+  /** Scores the judge has actually emitted, so the gate can be held inside their range. */
+  private readonly scoreWindow = new EmpiricalScoreWindow();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private compiledEntryGraph: any;
@@ -243,6 +249,23 @@ export class AiAgentClubOrchestrator {
 
   public getSystem1Weights(): System1Weights {
     return this.system1Weights;
+  }
+
+  /** Re-score recent entries so the reachability clamp works on the first tick after a restart. */
+  public seedScoreWindow(scores: number[]) {
+    this.scoreWindow.seed(scores);
+  }
+
+  public getScoreWindowStats() {
+    return this.scoreWindow.stats();
+  }
+
+  private resolveGate() {
+    return resolveReachableThreshold(
+      this.styleParams.minAiConfidenceScore,
+      this.system1Weights,
+      this.scoreWindow.stats()
+    );
   }
 
   public getLocalDecisionConfig(): LocalDecisionConfig {
@@ -350,19 +373,24 @@ export class AiAgentClubOrchestrator {
 
         // Shared memory nudges the probability, then the gate is re-applied so a
         // historically losing setup genuinely has to clear a higher bar. The bar itself
-        // is held below the model's attainable ceiling: a threshold the weights can no
-        // longer reach would filter 100% of signals forever, which is an outage, not risk.
+        // is held inside the model's real range — its structural ceiling and, once enough
+        // candidates exist, the p95 of scores it actually emits. A gate above every score
+        // the model can produce filters 100% of signals forever, which is an outage, not risk.
         const adjusted = clamp(decision.calibratedScore + state.confidenceDelta, 0, 1);
-        const gate = resolveReachableThreshold(
-          this.styleParams.minAiConfidenceScore,
-          this.system1Weights
-        );
+        const gate = this.resolveGate();
         const approved = adjusted >= gate.threshold;
-        const clampNote = gate.clamped
-          ? ` — configured ${f6(this.styleParams.minAiConfidenceScore)} exceeds the model ceiling ${f6(
-              gate.ceiling
-            )}; gate held at ${f6(gate.threshold)}`
-          : '';
+        const clampNote =
+          gate.source === 'ceiling'
+            ? ` — configured ${f6(this.styleParams.minAiConfidenceScore)} exceeds the model ceiling ${f6(
+                gate.ceiling
+              )}; gate held at ${f6(gate.threshold)}`
+            : gate.source === 'observed'
+              ? ` — configured ${f6(
+                  this.styleParams.minAiConfidenceScore
+                )} exceeds the observed p95 ${f6(
+                  gate.observedP95 ?? 0
+                )} of ${gate.observedN} recent candidates; gate held at ${f6(gate.threshold)}`
+              : '';
 
         this.touchAgent(
           'system1-judge',
@@ -372,6 +400,8 @@ export class AiAgentClubOrchestrator {
                 : ''
             } (${decision.choiceAction}) in ${decision.latencyMs.toFixed(2)}ms${clampNote}`
         );
+
+        this.scoreWindow.record(adjusted);
 
         return {
           system1Approved: approved,
@@ -397,10 +427,7 @@ export class AiAgentClubOrchestrator {
           Math.round(this.styleParams.minLeverage),
           Math.round(this.styleParams.maxLeverage)
         );
-        const gate = resolveReachableThreshold(
-          this.styleParams.minAiConfidenceScore,
-          this.system1Weights
-        );
+        const gate = this.resolveGate();
         this.touchAgent(
           'leverage-architect',
           `${state.symbol}: Approved $${f6(this.styleParams.baseMarginUsd)} margin | Ladder ${startLev}x→${
@@ -410,7 +437,11 @@ export class AiAgentClubOrchestrator {
         return {
           recommendedStartLeverage: startLev,
           summaryNote: `AI Club Consensus PASS (score=${f6(state.aiConfidence)}, start ${startLev}x)${
-            gate.clamped ? ` [gate held at ${f6(gate.threshold)}: configured threshold is above the model ceiling]` : ''
+            gate.clamped
+              ? ` [gate held at ${f6(
+                  gate.threshold
+                )}: configured ${f6(this.styleParams.minAiConfidenceScore)} is above the model's reachable range]`
+              : ''
           }${state.operatorBriefing ? ` — briefed: ${state.operatorBriefing}` : ''}`,
         };
       })

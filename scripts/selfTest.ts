@@ -27,9 +27,11 @@ import {
 import { diagnoseLoss } from '../server/ai/lossAutopsy.js';
 import { buildTradeLesson } from '../server/ai/lessonMemory.js';
 import {
+  EmpiricalScoreWindow,
   attainableSystem1Score,
   createDefaultSystem1Weights,
   resolveReachableThreshold,
+  scoreFeatures,
 } from '../server/ai/system1Primitives.js';
 import { MarketScanner40 } from '../server/engine/marketScanner.js';
 import { OrderBookTracker } from '../server/engine/orderBookTracker.js';
@@ -195,6 +197,38 @@ async function runSelfTests() {
     const untouchedGate = resolveReachableThreshold(0.56, createDefaultSystem1Weights());
     assert.equal(untouchedGate.clamped, false, 'a reachable threshold must be left untouched');
 
+    // The structural ceiling is still optimistic: it assumes every feature maxes out at
+    // once, while the shrunken weights emit scores in 0.47..0.62 on real tape. Once the
+    // judge has seen enough candidates its gate is also held at their p95 (top 5%),
+    // never below 0.55, and never above the configured value.
+    const window = new EmpiricalScoreWindow(60);
+    for (let i = 0; i < 60; i++) window.record(0.47 + (i * (0.617 - 0.47)) / 59);
+    assert.equal(window.size, 60);
+    assert.equal(f6(window.quantile(0.95)!), '0.609525');
+
+    const observedGate = resolveReachableThreshold(0.676, collapsedWeights, window.stats());
+    assert.equal(observedGate.source, 'observed');
+    assert.equal(f6(observedGate.threshold), '0.609525');
+    assert.equal(observedGate.clamped, true);
+
+    const coldGate = resolveReachableThreshold(0.676, collapsedWeights, { n: 12, p95: 0.6 });
+    assert.equal(coldGate.source, 'ceiling', 'a 12-sample window must not move the gate');
+    assert.equal(f6(coldGate.threshold), f6(liveCeiling - 0.01));
+
+    const floorGate = resolveReachableThreshold(0.676, collapsedWeights, { n: 60, p95: 0.41 });
+    assert.equal(
+      f6(floorGate.threshold),
+      '0.550000',
+      'the empirical gate must never fall below 0.55'
+    );
+
+    const healthyGate = resolveReachableThreshold(0.56, createDefaultSystem1Weights(), {
+      n: 60,
+      p95: 0.6,
+    });
+    assert.equal(healthyGate.source, 'configured', 'the empirical window must never raise a gate');
+    assert.equal(f6(healthyGate.threshold), '0.560000');
+
     const lockedClub = new AiAgentClubOrchestrator({
       styleParams: { ...style, minAiConfidenceScore: 0.676 },
       system1Weights: collapsedWeights,
@@ -230,6 +264,73 @@ async function runSelfTests() {
     assert.ok(
       ceilingTrade.confidence <= liveCeiling + 1e-9,
       'a calibrated score can never exceed the model ceiling'
+    );
+
+    // A candidate below the structural gate but above the observed p95 is exactly what the
+    // tape offers on a real session: it must pass once the window is seeded, and it must
+    // still be refused when the window says it is not in the top 5% of recent candidates.
+    const seededClub = new AiAgentClubOrchestrator({
+      styleParams: { ...createDefaultStyleParams(), minAiConfidenceScore: 0.676 },
+      system1Weights: collapsedWeights,
+      localConfig: {
+        provider: 'builtin',
+        endpointUrl: 'http://127.0.0.1:11434',
+        modelName: 'nimble',
+        lastLatencyMs: 0,
+        lastStatus: 'Ready',
+      },
+    });
+    seededClub.seedScoreWindow(
+      Array.from({ length: 60 }, (_, i) => 0.47 + (i * (0.617 - 0.47)) / 59)
+    );
+    const midFeatures = {
+      ...stratEval.features,
+      rsi15s: 46,
+      pullbackDepthPct: 0.4,
+      orderflowDeltaRatio: 1.7,
+      candleBodyRatio: 0.65,
+      wickRejectionRatio: 0.38,
+      absChange24hPct: 12,
+      volatilityAtrPct: 0.25,
+      aiConfidence: 0,
+    };
+    const midScore = scoreFeatures('LONG', midFeatures, collapsedWeights);
+    assert.ok(
+      midScore > 0.609525 && midScore < liveCeiling - 0.01,
+      `mid candidate must sit between the observed p95 and the structural gate, got ${f6(midScore)}`
+    );
+    const midTrade = await seededClub.evaluateEntryCandidate({
+      symbol: 'MIDUSDT',
+      side: 'LONG',
+      features: midFeatures,
+      minNotional: 5,
+    });
+    assert.equal(
+      midTrade.approved,
+      true,
+      'a top-quintile candidate must pass once the gate is held at the observed p95'
+    );
+    assert.equal(f6(midTrade.confidence), f6(midScore));
+
+    const weakTrade = await seededClub.evaluateEntryCandidate({
+      symbol: 'WEAKUSDT',
+      side: 'LONG',
+      features: {
+        ...midFeatures,
+        rsi15s: 56,
+        pullbackDepthPct: 0.02,
+        orderflowDeltaRatio: 1.2,
+        candleBodyRatio: 0.4,
+        wickRejectionRatio: 0.12,
+        absChange24hPct: 2,
+        volatilityAtrPct: 0.02,
+      },
+      minNotional: 5,
+    });
+    assert.equal(
+      weakTrade.approved,
+      false,
+      'the empirical gate must still refuse a candidate outside the top quintile'
     );
 
     // Simulate a Premature Pullback Loss and verify AI Club evolves trading style parameters

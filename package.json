@@ -1,6 +1,6 @@
 {
   "name": "hft-trading-lifestyle-quant",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "private": true,
   "description": "HFT — Binance USDⓈ-M Futures Automated High-Frequency Trading Bot & Self-Learning AI Agent Club. Developed by Trading Lifestyle Quant.",
   "type": "module",

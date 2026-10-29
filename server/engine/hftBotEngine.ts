@@ -21,6 +21,7 @@ import { OrderFlowTracker } from './orderFlowTracker.js';
 import { OrderBookTracker } from './orderBookTracker.js';
 import { evaluateOrderFlow } from './orderFlowStrategy.js';
 import { AiAgentClubOrchestrator } from '../ai/agentClubGraph.js';
+import { scoreFeatures } from '../ai/system1Primitives.js';
 import { StateStore } from './stateStore.js';
 import { MarketScanner40 } from './marketScanner.js';
 import { RestMarketFeed } from './restMarketFeed.js';
@@ -124,6 +125,16 @@ export class HftBotEngine {
       lessons: this.stateStore.getLessons(),
       operatorNotes: this.stateStore.getOperatorNotes(),
     });
+    // Re-score recent entries under the live weights so the gate's reachability clamp
+    // knows what this model actually emits instead of waiting 40 candidates per restart.
+    const replayWeights = this.stateStore.getSystem1Weights();
+    this.aiClub.seedScoreWindow(
+      this.stateStore
+        .getClosedTradeHistory()
+        .flatMap((t) =>
+          t.entryFeatures ? [scoreFeatures(t.side, t.entryFeatures, replayWeights)] : []
+        )
+    );
 
     this.engineRunning = this.stateStore.getEngineRunning();
 

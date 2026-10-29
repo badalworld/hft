@@ -25,6 +25,18 @@
 
 ---
 
+## What's New in `v1.6.2`
+
+**The `v1.6.1` clamp answered the wrong question.** It held the confidence gate one point below the *structural* ceiling — the score the model would emit if every feature hit its cap at the same instant. On a real tape that vector never occurs. At `2026-10-29T04:46Z` the live weights summed to a structural ceiling of `0.633405` and the gate was held at `0.623405`, while the scores the judge actually produced over `60` candidates in six and a half minutes ran `0.505358 → 0.618466` (p50 `0.573550`, p95 `0.601365`). Re-scoring all `111` settled entries under the same weights gave p50 `0.568892`, p90 `0.602268`, p95 `0.608630`, max `0.617128`. **Not one candidate in either population could clear the gate.** The engine was armed, flat, scanning, and refusing every entry — `59` consecutive AI Club vetoes, all of them the same sentence.
+
+It was not the fee hurdle. In the same window `121` candidates were refused for cost coverage, but only failures are logged: the `59` candidates that reached the judge had already passed it. The fee gate was filtering two-thirds of the tape, which is its job. The confidence gate was filtering the remaining third, forever.
+
+The loop could not repair itself, and that is the real defect. Both learners only move on **closed trades**: RLCD shrinks weights after losses and the council ratchets `minAiConfidenceScore` after losses. A gate above the model's output distribution produces zero trades, which produces zero post-mortems, which leaves the gate and the weights exactly where they are. The system had starved the only feedback that could have changed its mind.
+
+`v1.6.2` makes the gate answer to the distribution the model actually emits. `EmpiricalScoreWindow` keeps the last `240` scores the judge produced; once it holds at least `40`, `resolveReachableThreshold()` also clamps the gate to their **p95** — the top 5% of what the market is currently offering — with a hard floor of `0.55` so a model with no discrimination left cannot trade on noise. The clamp only ever lowers the configured value, never raises it, and it disappears the moment the configured gate is inside the observed range again. The window is seeded at boot by re-scoring the closed-trade history under the live weights, so the fix is active on the first tick after a restart instead of after `40` fresh candidates.
+
+At the latest capture the same weights now open the gate at their measured p95 instead of an unreachable `0.623405`. A self-test pins the arithmetic — `0.609525` from a known 60-sample distribution, the `0.55` floor, the `12`-sample warm-up that must not move anything, and a mid-range candidate that passes only because the empirical window exists — and a second one asserts the gate still refuses a below-quintile candidate. The `v1.6.1` structural clamp remains as the outer bound; this release adds the inner one.
+
 ## What's New in `v1.6.1`
 
 **A confidence gate the model cannot reach is not a risk control; it is an outage.** By `2026-10-29T00:05Z` the live book had made `109` settled closes, the learner had spent them shrinking the System-1 feature weights and raising its temperature, and the council had spent them ratcheting `minAiConfidenceScore` from `0.522000` to `0.676000`. Nothing connected those two loops: at the live weights the highest probability the model could express was `0.641479`. The engine stayed armed and refused every entry for hours — `412` consecutive AI Club vetoes, best observed score `0.639993` — while the dashboard correctly reported that no setup qualified. It was not waiting for a better tape. It could not have approved one.
@@ -33,7 +45,7 @@
 
 Restarting onto `v1.6.0` with the fixed gate produced the first fills in hours: `TAGUSDT` closed `+$0.102432` net on a trailing stop after peaking at `+8.605091%`, and `STARUSDT` closed `-$0.147418` net on the `-6.426735%` software guard. Two live defects were found in the same session and are recorded rather than hidden: the exchange-side `STOP_MARKET` arm is refused by papi with `-1116` because conditional orders live at `/papi/v1/um/conditional/order`, not `/papi/v1/um/order` ([§8](#8-1-second-open-position-monitor--5-roi-trailing-stop)); and the order-flow tape rides the `aggTrade` socket, which delivers no frames on this network, so every shadow verdict reads `NO_SIGNAL` while the REST fallback feeds candles only ([§4](#4-market-data-transport-resilience-ws--rest-failover)).
 
-The clamp is live at the latest capture (`2026-10-29T04:37:01Z`, `111` settled closes, weights after `111` Brier updates, temperature `1.372`): the attainable ceiling is `0.633405`, the configured gate is `0.627000`, and the effective gate is held at `0.623405`. The engine was armed and flat at that moment, with `3` assets in `CONFIRMED_SIGNAL`, `22` in `PULLBACK_DETECTED` and `15` in `MONITORING` — a strategy actively looking, not a gate that cannot open.
+The clamp is live at the latest capture (`2026-10-29T04:37:01Z`, `111` settled closes, weights after `111` Brier updates, temperature `1.372`): the attainable ceiling is `0.633405`, the configured gate is `0.627000`, and the effective gate is held at `0.623405`. The engine was armed and flat at that moment, with `3` assets in `CONFIRMED_SIGNAL`, `22` in `PULLBACK_DETECTED` and `15` in `MONITORING` — a strategy actively looking, not a gate that cannot open. **The next hour disproved that last sentence:** the structural ceiling is reachable only on paper, and the gate still refused `59/59` candidates. That measurement and its fix are the `v1.6.2` section above.
 
 ## What's New in `v1.6.0`
 
@@ -282,7 +294,7 @@ Every claim below was observed on a live, armed, real-money session — not asse
 | **The 95% capital cap engages and halts entries** | Scanner reached `PAUSED_MARGIN_FULL` at `85.769063%` pool utilization, stopped opening new trades, and kept managing the live ones. |
 | **Strategy logic is genuinely varied, not degenerate** | At `2026-10-29T04:37:01Z`, across the 40-asset scanner: `rsi15s` → **34 distinct values**, `pullbackDepthPct` → 34, `orderflowDeltaRatio` → 28, `candleCount15s` → 22, and **zero** assets pinned at the degenerate `50.000000`. Stages: `15` `MONITORING`, `22` `PULLBACK_DETECTED`, `3` `CONFIRMED_SIGNAL`. |
 | **Self-heals a blocked WebSocket** | At the same capture the market socket was timing out its opening handshake and the `aggTrade` socket completed its handshake but delivered no frames. The REST feed engaged with no operator action (`wsConnected: false`, `usedWeight1m: 45 / 2,400`, mean REST round trip `561 ms`) and the scanner still produced the varied diagnostics above. |
-| **AI Club genuinely learns** | `111 / 111` settled closes carry a post-mortem. The vault holds `64` persisted style mutations, `75` council ballots (`38` approved / `37` rejected), `72` lessons across `9` setup bands and `111` contrastive training pairs. After the `STARUSDT` premature entry the council approved `minAiConfidenceScore` `0.612000 → 0.627000` `3/3`, and `v1.6.1` then holds that target at the model's own ceiling (`0.623405` effective). The full ledger is in [§9](#9-zero-cost-self-learning-ai-agent-club). |
+| **AI Club genuinely learns** | `111 / 111` settled closes carry a post-mortem. The vault holds `64` persisted style mutations, `75` council ballots (`38` approved / `37` rejected), `72` lessons across `9` setup bands and `111` contrastive training pairs. After the `STARUSDT` premature entry the council approved `minAiConfidenceScore` `0.612000 → 0.627000` `3/3`; `v1.6.1` held that target at the model's structural ceiling (`0.623405`), and `v1.6.2` now also holds it at the p95 of the scores the judge actually emits, so the gate selects the top 5% of live candidates instead of refusing all of them. The full ledger is in [§9](#9-zero-cost-self-learning-ai-agent-club). |
 | **Type-safe & verified** | `npx tsc --noEmit` → exit 0. `npx vite build` → exit 0. All **11** self-test groups → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
 
 ---
@@ -322,7 +334,7 @@ The same account, measured three times on `2026-10-28/29`:
 | `02:52:39Z` | `109` | `59.633028%` | `-$0.386237` | `$2.185561` | `-$2.571798` | `+$0.090161` / `-$0.191643` |
 | `04:37:01Z` | `111` | `59.459459%` | `-$0.391232` | `$2.225552` | `-$2.616784` | `+$0.090347` / `-$0.190660` |
 
-**This progression is the argument for `v1.5.0` and `v1.6.1`.** Thirty-three more closes after the first capture moved the win rate by less than a point: the learning loop was not finding a materially better entry, because entry accuracy was never the binding constraint. Gross improved by `+$0.755957` across those closes while `$0.661620` more commission was paid — **the strategy is close to break-even before fees, and fees are the whole loss.** The payoff asymmetry narrowed from `2.41:1` to `2.11:1`, which still needs a `67.85%` win rate the book has never printed. Nothing about raising or lowering leverage changes this: the hurdle is `2 × taker × leverage` on margin ROI while the move available is a price move, and leverage cancels out of the ratio. That is why `v1.5.0` stops trying to win on accuracy and starts refusing trades that cannot pay for their own exit (`minFeeHurdleMultiple`) and stops giving back captured profit to a loose trail (`-6.0` guard, precedence fix) — and why `v1.6.1` stops a tightening loop from ratcheting the confidence gate above what the model can output.
+**This progression is the argument for `v1.5.0` and `v1.6.1`.** Thirty-three more closes after the first capture moved the win rate by less than a point: the learning loop was not finding a materially better entry, because entry accuracy was never the binding constraint. Gross improved by `+$0.755957` across those closes while `$0.661620` more commission was paid — **the strategy is close to break-even before fees, and fees are the whole loss.** The payoff asymmetry narrowed from `2.41:1` to `2.11:1`, which still needs a `67.85%` win rate the book has never printed. Nothing about raising or lowering leverage changes this: the hurdle is `2 × taker × leverage` on margin ROI while the move available is a price move, and leverage cancels out of the ratio. That is why `v1.5.0` stops trying to win on accuracy and starts refusing trades that cannot pay for their own exit (`minFeeHurdleMultiple`) and stops giving back captured profit to a loose trail (`-6.0` guard, precedence fix) — and why `v1.6.1` stops a tightening loop from ratcheting the confidence gate above what the model can output, and `v1.6.2` stops it from ratcheting above what the model actually does output.
 
 ### First continuous session, in close order
 
@@ -670,6 +682,17 @@ This is not a demo mode, and the artifacts are inspectable on disk rather than a
 - **72 lessons across 9 setup bands** in shared memory (`snapshot.lessonPatterns`), read back on every candidate before an agent votes.
 - All of it at **`$0.00` inference cost** — no LLM call is made on either path. Inspect the mutated set any time in `snapshot.styleParams`.
 
+### The gate has to be reachable for the loop to learn
+
+The club's two learners both consume **closed trades**. RLCD adjusts the System-1 weights after each settlement, and the council ratchets `minAiConfidenceScore` after each loss. An entry gate that sits above every score the model can emit therefore does not merely block trades — it disconnects the feedback that would move the gate. `v1.6.2` closes that hole with two bounds, applied in order and only ever downward:
+
+| Bound | Formula | What it protects against |
+| :--- | :--- | :--- |
+| Structural | `min(configured, attainableSystem1Score(weights) − 0.01)` | A threshold above the score the model could reach with every feature at its cap. |
+| Empirical | `min(previous, max(0.55, p95 of the last 240 judge scores))`, armed at `n ≥ 40` | A threshold that is structurally reachable but never reached in practice, because real feature mixes do not max out together. |
+
+`EmpiricalScoreWindow` records the post-memory score of every candidate that reaches the judge and exposes its p95; `seedScoreWindow()` replays the closed-trade history through `scoreFeatures()` at boot so the bound is live on the first tick. The floor of `0.55` is the honest stop: if the top 5% of live candidates cannot beat a coin flip, the judge refuses them rather than trading noise. When the configured gate is inside the observed range it is used untouched — the window can only ever lower a gate, never raise one.
+
 ### The council has ruled in production
 
 Every post-mortem taken since `v1.3.0` shipped has produced a ballot — **five cast, one approved and four rejected** — and the split is the whole design argument:
@@ -753,6 +776,8 @@ Before touching strategy parameters, look at the scanner's per-asset diagnostics
 | `candleCount15s` identical on all 40, `rsi15s` = `50.000000`, `orderflowDeltaRatio` = `1.000000` | Candle builder is fabricating flat bars from a dead feed (pre-`v1.2.0` behaviour). Run `scripts/diagnoseMarketData.ts`. |
 | Values vary but every asset sits at `MONITORING` | Strategy is genuinely not finding setups. Wait, or widen `pullbackRsiLongMax` / `pullbackRsiShortMin`. |
 | Some assets at `CONFIRMED_SIGNAL`, no order | Check the logs for `MIN_NOTIONAL` / `LOT_SIZE` rejections or `PAUSED_MARGIN_FULL`. |
+| `⛔ FEE HURDLE` on most triggers | The 15s excursion cannot pay the round trip at `minFeeHurdleMultiple`. This is the fee gate working; do not lower it below `1.0`. |
+| `AI Club filtered … System-1 score X < threshold Y` on **every** candidate | Compare `X` never reaching `Y` against the `p95` named in the same line. `v1.6.2` clamps this automatically at `n ≥ 40`; if the line still shows `source = configured`, the sample is too small or the gate is genuinely inside the observed range. |
 | `IN_POSITION` appears | The pipeline is healthy end-to-end. |
 
 ### A Binance `-2015 Invalid API-key, IP, or permissions` rejection has three distinct causes — whitelisting is only one
