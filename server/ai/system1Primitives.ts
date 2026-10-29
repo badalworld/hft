@@ -390,10 +390,47 @@ export class System1DecisionEngine {
     config: LocalDecisionConfig
   ): Promise<number | null> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 130); // Strict 130ms HFT budget
+    const timeoutMs = config.provider === 'threerouter' ? 2500 : 130;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const promptDoc = `HFT 15s Signal: ${symbol} ${side}, 24hMove=${f.absChange24hPct.toFixed(2)}%, RSI7=${f.rsi15s.toFixed(1)}, Pullback=${f.pullbackDepthPct.toFixed(3)}%, DeltaRatio=${f.orderflowDeltaRatio.toFixed(2)}, BodyRatio=${f.candleBodyRatio.toFixed(2)}.`;
+
+      if (config.provider === 'threerouter') {
+        const apiKey = process.env.THREEROUTER_API_KEY || '';
+        const res = await fetch(`${config.endpointUrl.replace(/\/$/, '')}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+          },
+          body: JSON.stringify({
+            model: config.modelName || 'deepseek-v4-pro',
+            messages: [
+              {
+                role: 'system',
+                content:
+                  'You are a quantitative trading decision gate. Given 15s microstructure features, answer YES if high probability of reaching 5% leveraged gain, NO otherwise.',
+              },
+              {
+                role: 'user',
+                content: `${promptDoc}\nAnswer YES or NO only:`,
+              },
+            ],
+            max_tokens: 5,
+            temperature: 0,
+          }),
+          signal: controller.signal,
+        });
+        if (!res.ok) return null;
+        const json = (await res.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        const txt = (json.choices?.[0]?.message?.content || '').trim().toUpperCase();
+        if (txt.startsWith('YES')) return 0.85;
+        if (txt.startsWith('NO')) return 0.20;
+        return null;
+      }
 
       if (config.provider === 'laya_http' || config.provider === 'kev_http') {
         const res = await fetch(`${config.endpointUrl.replace(/\/$/, '')}/v1/decide`, {
