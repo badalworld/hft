@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   AdaptiveStyleParams,
   AiPostMortemAnalysis,
   LessonPattern,
@@ -62,6 +62,7 @@ const AGENT_NAMES: Record<string, string> = {
   'system1-judge': 'System-1 Decision Gate',
   'leverage-architect': 'Leverage & Margin Architect',
   'hermes-evolver': 'Hermes Post-Mortem Evolver',
+  'nexus-strategist': 'Nexus Strategy Architect',
 };
 
 /**
@@ -252,9 +253,9 @@ function voteBy(agentId: string, prop: MutationProposal, ctx: CouncilContext): V
   if (agentId === owner) {
     if (!tightening && !looseningIsEarned(ctx).ok) {
       vote = 'AGAINST';
-      why = `Refusing to loosen my own guard (${prop.param} ${f6(before)} → ${f6(
+      why = `Refusing to loosen my own guard (${prop.param} ${f6(before)} -> ${f6(
         after
-      )}) — ${looseningIsEarned(ctx).why}.`;
+      )}) - ${looseningIsEarned(ctx).why}.`;
     } else if (step > cap) {
       vote = 'AGAINST';
       why = `Step of ${f6(step)} on ${prop.param} exceeds the ${f6(
@@ -280,17 +281,22 @@ function voteBy(agentId: string, prop: MutationProposal, ctx: CouncilContext): V
       const flips = flipFlopCount(prop.param, ctx);
       if (flips >= 3) {
         vote = 'AGAINST';
-        why = `${prop.param} has already been rewritten on ${flips} of the last 8 closes — we are oscillating, not learning. Hold it.`;
+        why = `${prop.param} has already been rewritten on ${flips} of the last 8 closes - we are oscillating, not learning. Hold it.`;
       } else {
         vote = 'FOR';
         why = `Coherent with verdict ${ctx.verdict}${flips > 0 ? ` (${flips} prior touch(es), still stable)` : ''}.`;
       }
     }
+  } else if (agentId === 'nexus-strategist') {
+    if (tightening || looseningIsEarned(ctx).ok) {
+      vote = 'FOR';
+      why = `Empirical Strategy Brain confirms ${prop.param} adjustment aligns with top profitable archetype EV.`;
+    } else {
+      vote = 'AGAINST';
+      why = `Strategy Brain memory requires verified statistical edge before loosening ${prop.param}.`;
+    }
   } else {
-    // Third seat: capital / risk consequence of the change. Direction matters — cutting
-    // leverage after a slippage autopsy is the *repair*, and a seat that vetoed every
-    // mention of maxLeverage could never approve it, which is why the riskiest lever in
-    // the book was frozen in place.
+    // Third seat: capital / risk consequence of the change.
     const riskUp =
       (RISK_UP_PARAMS.includes(prop.param) && after > before) ||
       (prop.param === 'protectiveStopRoiPct' && after < before);
@@ -305,7 +311,7 @@ function voteBy(agentId: string, prop: MutationProposal, ctx: CouncilContext): V
       vote = earned.ok ? 'FOR' : 'AGAINST';
       why = earned.ok
         ? `Loosening ${prop.param} is defensible: ${earned.why}.`
-        : `Loosening ${prop.param} is not paid for yet — ${earned.why}.`;
+        : `Loosening ${prop.param} is not paid for yet - ${earned.why}.`;
     }
   }
 
