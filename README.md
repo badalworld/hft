@@ -33,6 +33,8 @@
 
 Restarting onto `v1.6.0` with the fixed gate produced the first fills in hours: `TAGUSDT` closed `+$0.102432` net on a trailing stop after peaking at `+8.605091%`, and `STARUSDT` closed `-$0.147418` net on the `-6.426735%` software guard. Two live defects were found in the same session and are recorded rather than hidden: the exchange-side `STOP_MARKET` arm is refused by papi with `-1116` because conditional orders live at `/papi/v1/um/conditional/order`, not `/papi/v1/um/order` ([§8](#8-1-second-open-position-monitor--5-roi-trailing-stop)); and the order-flow tape rides the `aggTrade` socket, which delivers no frames on this network, so every shadow verdict reads `NO_SIGNAL` while the REST fallback feeds candles only ([§4](#4-market-data-transport-resilience-ws--rest-failover)).
 
+The clamp is live at the latest capture (`2026-10-29T04:37:01Z`, `111` settled closes, weights after `111` Brier updates, temperature `1.372`): the attainable ceiling is `0.633405`, the configured gate is `0.627000`, and the effective gate is held at `0.623405`. The engine was armed and flat at that moment, with `3` assets in `CONFIRMED_SIGNAL`, `22` in `PULLBACK_DETECTED` and `15` in `MONITORING` — a strategy actively looking, not a gate that cannot open.
+
 ## What's New in `v1.6.0`
 
 **A 15-second candle records the result of the auction, never the fight that produced it.** It cannot say whether buyers were lifting offers or sellers were hitting bids, whether the move was accelerating or already exhausted, or whether a wall was quietly absorbing everything thrown at it. `v1.6.0` adds that missing layer: a live order-flow gate built from the top-20 depth book (`@depth20@500ms`) and the executed tape, scoring every `15s` trigger against six checks — fee-plus-spread cost, order-book imbalance, cumulative volume delta level and slope, aggressive buy/sell ratio, price location in its own range, and absorption.
@@ -105,7 +107,7 @@ The club's own record in that snapshot:
 
 The refusals are the interesting half. On `BLESSUSDT` every seat voted `FOR` a tightening — `minAiConfidenceScore 0.661000 → 0.676000`, approved `3/3`. On `TAGUSDT` the same parameter was proposed the other way — `0.676000 → 0.668000` — and the panel voted `1/3`: *"Refusing to loosen my own guard (minAiConfidenceScore 0.676000 → 0.668000) — history says otherwise (48.148148% win over 27, $-1.454204 net)."* `trailingFloorRoiPct` was raised twice on fee-drag evidence, `3.890000 → 4.010000 → 4.130000`. A profitable close still does not get to relax the system.
 
-One honest artefact: those two trailing-floor ballots show **two votes, not three**, because the process serving this account predates the three-seat fix from `v1.5.0` (Hermes owned the parameter and also occupied a seat, collapsing the panel). The code in this repository seats three independent agents, and the self-test now pins that property for all three trailing parameters. It takes effect on the next backend restart.
+One honest artefact: those two trailing-floor ballots show **two votes, not three**, because the process serving this account predated the three-seat fix from `v1.5.0` (Hermes owned the parameter and also occupied a seat, collapsing the panel). The code in this repository seats three independent agents, and the self-test pins that property for all three trailing parameters. **That backend was restarted onto `v1.6.0` at `04:08Z`**, so every ballot cast since carries three seats. Across the full ledger the council has now cast **`75` ballots — `38` approved, `37` rejected**.
 
 > **Verification status, stated separately.** `tsc` is clean, `vite build` succeeds, and the self-test suite passes all **11 groups**, including the new order-flow group: quote-denominated CVD and slope from real bucket math, distance-weighted OBI symmetry on mirrored books, touch-refill ratios, all nine verdicts (`NO_DATA` on a missing and a stale book, `NO_SIGNAL` on a thin tape, `EXECUTION_REJECT` on cost, `OBI_REJECT`, `CVD_REJECT`, `RATIO_REJECT`, `PRICE_REJECT`, `ABSORPTION_REJECT` on both sides), `shadow` as the default and `enforce` surviving a store reload, plus council approval of a one-step OBI tightening, refusal of an over-step, and the inverted absorption polarity. The readout was driven in a browser against the live account, served by the running backend itself on port `3000` (the HTML carries `/@vite/client`, so the current frontend source is already what the browser receives): the font loaded (`document.fonts.check('700 22px "DSEG7 Classic"') === true`), both readouts measured `79 × 22px` at a `600px` viewport with the correct `aria-label`s, and the AI Club opened with the ballot record above. That check also caught a real rollout bug — the new scanner read `undefined.toFixed()` from the old backend's missing fields and blanked the page — which is fixed by type guards that render `—`. **The backend was restarted onto `v1.6.0` at `04:08Z`**, after this paragraph was first written: the depth socket is live (`43` fresh books) and the order-flow layer is scoring in `shadow`, while the DSEG7 panel was already live because `npm run dev` serves the client through Vite's dev middleware rather than from a stale bundle. `v1.6.1` is the reachability fix on top of that restart. The CodeRabbit CLI is not installed on this machine; the audit was performed with reviewer agents plus static verification and line-by-line reads.
 
@@ -138,7 +140,7 @@ The feed was not one bug, it was five, and the visible symptom — a screen that
 
 | Fix | Detail |
 | :--- | :--- |
-| **Exit precedence, then a stop the exchange enforces** | The protective guard tightened from **`-9.500000%`** to **`-6.000000%`** ROI, and the monitor now evaluates the guard before the trail so a position cannot be re-classified as a trailing exit on the way through. The software guard is backed by an **exchange-side `STOP_MARKET`** with `closePosition:'true'`, `workingType:'MARK_PRICE'` and `priceProtect:'TRUE'` placed the moment a position opens — so a `1s` poll gap, a crashed process, or a dead network no longer leaves a live position with no stop at all. `closePosition` is used instead of a quantity so the trigger always matches the live size, and the ROI→price inversion rounds *toward* the mark, never across it. |
+| **Exit precedence, then a stop the exchange enforces** | The protective guard tightened from **`-9.500000%`** to **`-6.000000%`** ROI, and the monitor now evaluates the guard before the trail so a position cannot be re-classified as a trailing exit on the way through. The release also attempts to park an **exchange-side `STOP_MARKET`** (`closePosition:'true'`, `workingType:'MARK_PRICE'`, `priceProtect:'TRUE'`) the moment a position opens. **On Portfolio Margin that arm does not land** — papi refuses `STOP_MARKET` at `/papi/v1/um/order` with `-1116 Invalid orderType` because conditional orders live at `/papi/v1/um/conditional/order`. Until that migration ships, the enforced exit is the `1s` software guard, and every failed arm is logged under `EXCHANGE_STOP` rather than assumed to have succeeded. Even on a successful arm, `closePosition` is used instead of a quantity so the trigger always matches the live size, and the ROI→price inversion rounds *toward* the mark, never across it. |
 | **The leverage ladder can no longer fill twice** | A rejected order used to be re-sent at the next rung. Binance rejects some orders *after* matching them, so the old path could open two positions on one signal. Now only a **pre-fill** rejection set (`-4164`, `-4148`, `-4165`, `-1013` on quantity, `-2019` margin) is safe to escalate; `-2013` / `-2011` / a non-numeric code / a timeout / any `5xx` is **ambiguous** and is resolved by `GET /papi/v1/um/order?origClientOrderId` — the order is never re-sent, only looked up. |
 | **The improvement council can actually act** | Ballots were being tallied and then discarded, and two parameters were voted on with inverted polarity. `HIGHER_IS_TIGHTER` now states the sign for all sixteen parameters — `protectiveStopRoiPct` is inverted because it lives on a negative scale, so **`-6.0` is tighter than `-9.5` even though the number went up** — and `MAX_STEP` caps how far one post-mortem may move anything. Sizing levers get the smallest steps in the book (`baseMarginUsd 0.5`, one leverage rung) because a bigger bet is a looser stance, never a stricter one. |
 | **An entry must be able to pay for its own exit** | New `minFeeHurdleMultiple` (**`2.0`**, owner seat Alpha Scout, step `0.25`) gates on the measured `15s` ATR excursion: the expected ROI move must clear the round-trip taker cost **twice over** before the club is even consulted. Leverage cancels out of that ratio, so no rung of the ladder ever makes a small move winnable — the gate rejects the trade instead of escalating into it. A rejected symbol gets a `20s` cooldown and an `EXECUTION` log line quoting all three numbers. |
@@ -153,7 +155,7 @@ The feed was not one bug, it was five, and the visible symptom — a screen that
 - **`server/utils/netGuard.ts`** allows only `localhost`, `::1`, and an IPv4 literal in `127/8`, `10/8`, `172.16–31` or `192.168/16` — and rejects embedded credentials, query strings, fragments and non-`http(s)` schemes. That closes the `169.254.169.254` / `metadata.google.internal` path that would have had the trading process fetch cloud instance credentials on every decision.
 - **Bind-IP** is validated as an IPv4 literal at the route *and* at boot: a bad address already sitting in the vault is discarded with a `STATE` warning instead of being applied to the REST client and the WebSocket manager, where it would have made every signed request fail to leave the machine.
 
-> **Verification status, stated separately.** `npm run typecheck` is clean, `vite build` succeeds (`481.75 kB` bundle), and `npm test` passes all **10 groups** — the two new ones covering exactly the work above: the ledger version bumps on a settled trade and an income update but *not* on a credential write, `lightenSnapshot` removes all five heavy keys and keeps `timestamp`/`ledgerVersion`, every style-guard bound and relationship rule, every `isValidIpv4` case, and all eight refused decision endpoints each returning a non-empty reason. The odometer, the four hardened dialogs, the feed badge and the settings refusals were driven in the browser against the live account. **How the audit was run, stated honestly:** the CodeRabbit CLI is not installed on this machine, so the full-codebase audit was performed with reviewer agents plus static verification (`tsc`, `vite build`, the self-test suite, and line-by-line reads of every money path) rather than that tool. **What has not been done: the running backend has not been restarted.** Positions were open, so the new server code — the exchange-side stop, the ladder resolution, the version-gated stream — is not yet executing on this account. It goes live on the next restart, and the restart should happen when the book is flat.
+> **Verification status, stated separately.** `npm run typecheck` is clean, `vite build` succeeds (`481.75 kB` bundle), and `npm test` passes all **10 groups** — the two new ones covering exactly the work above: the ledger version bumps on a settled trade and an income update but *not* on a credential write, `lightenSnapshot` removes all five heavy keys and keeps `timestamp`/`ledgerVersion`, every style-guard bound and relationship rule, every `isValidIpv4` case, and all eight refused decision endpoints each returning a non-empty reason. The odometer, the four hardened dialogs, the feed badge and the settings refusals were driven in the browser against the live account. **How the audit was run, stated honestly:** the CodeRabbit CLI is not installed on this machine, so the full-codebase audit was performed with reviewer agents plus static verification (`tsc`, `vite build`, the self-test suite, and line-by-line reads of every money path) rather than that tool. **What happened next:** the book went flat and the backend was restarted — first onto `v1.5.0`, then onto `v1.6.0` at `04:08Z` — so the ladder resolution, the version-gated stream and the order-flow layer are executing on this account. The exchange-side stop arm did go live with that restart and was refused by papi with `-1116`; the `1s` software guard remains the enforced exit ([§8](#8-1-second-open-position-monitor--5-roi-trailing-stop)).
 
 </details>
 
@@ -274,14 +276,14 @@ Every claim below was observed on a live, armed, real-money session — not asse
 | Claim | Evidence |
 | :--- | :--- |
 | **Real orders reach production Binance** | Engine placed `BANKUSDT` `3589019958`, `NILUSDT` `1883047383`, `CAPUSDT` `686718001`, `ONUSDT` `1499115384` within ~70s of arming. |
-| **Full round trips open, manage and close** | `78` completed round trips across `24` distinct symbols (`ONUSDT`, `XANUSDT`, `TAGUSDT`, `FIGHTUSDT`, `BANKUSDT`, `NILUSDT`, `CAPUSDT`, `BLESSUSDT`, …); 6 open concurrently at peak. |
-| **Both exit paths fire** | Of those 78: `48` closed on `TRAILING_STOP_HIT`, `29` on `PROTECTIVE_STOP_LOSS`, `1` reported as `EXTERNAL_OR_EXCHANGE_CLOSE`. The profit predator and the risk guardrail are both live code, not dead branches. `46` of the 48 trailing exits banked a positive net — and the other 2 trailed out and *still* lost money to fees, which is the `MOVE_TOO_SMALL_FOR_FEES` case the v1.4.0 autopsy exists to name. |
+| **Full round trips open, manage and close** | `111` completed round trips across `32` distinct symbols (`ONUSDT`, `XANUSDT`, `TAGUSDT`, `FIGHTUSDT`, `BANKUSDT`, `NILUSDT`, `CAPUSDT`, `BLESSUSDT`, `STARUSDT`, …); `7` open concurrently at peak, as measured from `openedAt`/`closedAt` intervals in the vault. |
+| **Both exit paths fire** | Of those `111`: `68` closed on `TRAILING_STOP_HIT`, `42` on `PROTECTIVE_STOP_LOSS`, `1` reported as `EXTERNAL_OR_EXCHANGE_CLOSE`. The profit predator and the risk guardrail are both live code, not dead branches. `65` of the `68` trailing exits banked a positive net — the other `3` trailed out and *still* lost money to fees, which is the `MOVE_TOO_SMALL_FOR_FEES` case the `v1.4.0` autopsy exists to name. One protective exit was net-positive because the guard caught a position that had already paid for itself. |
 | **PNL is fee-aware, not gross-fiction** | Net PNL booked after real `/papi/v1/um/commissionRate` taker fees on both legs. One trade exposed the difference exactly: `+0.013476` gross, `0.020055` fees, **`-0.006579` net** — verdict `FEE_DRAG_BREAKEVEN`. |
 | **The 95% capital cap engages and halts entries** | Scanner reached `PAUSED_MARGIN_FULL` at `85.769063%` pool utilization, stopped opening new trades, and kept managing the live ones. |
-| **Strategy logic is genuinely varied, not degenerate** | Across the 40-asset scanner, sampled three times consecutively and stable: `rsi15s` → **39 distinct values**, `pullbackDepthPct` → 40, `orderflowDeltaRatio` → 37, `candleCount15s` → 29, and **zero** assets pinned at the degenerate `50.000000`. Stages observed: `COOLDOWN`, `MONITORING`, `PULLBACK_DETECTED`, `CONFIRMED_SIGNAL`, `IN_POSITION`. |
-| **Self-heals a blocked WebSocket** | REST feed engaged with no operator action and restored candle diversity from the flat `79 / 50.000000 / 0 / 1.000000` dead state. Still running in fallback as of `2026-10-28T22:30:48Z` — `wsConnected: false`, weight `765 / 2,400`, mean REST round trip `315 ms` — and the strategy is still producing varied, actionable diagnostics on all 40 assets. |
-| **AI Club genuinely learns** | Across the first run: 39 consecutive post-mortems, 37 persisted style mutations, each recording the parameter and its value before and after. `minAiConfidenceScore` walked `0.560 → 0.552 → 0.544 → 0.536 → 0.551 → 0.566`, and after two premature-entry losses Hermes tightened three gates at once — `minOrderflowDeltaRatio 1.180 → 1.220`, `pullbackRsiShortMin 48 → 49`, `minAiConfidenceScore 0.536 → 0.551` — then raised `trailingFloorRoiPct 3.650 → 3.770` in response to the fee-drag breakeven. The full ledger of what the loop has produced since is in [§9](#9-zero-cost-self-learning-ai-agent-club). |
-| **Type-safe & verified** | `npm run typecheck` → exit 0. `vite build` → exit 0. All **11** self-test groups → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
+| **Strategy logic is genuinely varied, not degenerate** | At `2026-10-29T04:37:01Z`, across the 40-asset scanner: `rsi15s` → **34 distinct values**, `pullbackDepthPct` → 34, `orderflowDeltaRatio` → 28, `candleCount15s` → 22, and **zero** assets pinned at the degenerate `50.000000`. Stages: `15` `MONITORING`, `22` `PULLBACK_DETECTED`, `3` `CONFIRMED_SIGNAL`. |
+| **Self-heals a blocked WebSocket** | At the same capture the market socket was timing out its opening handshake and the `aggTrade` socket completed its handshake but delivered no frames. The REST feed engaged with no operator action (`wsConnected: false`, `usedWeight1m: 45 / 2,400`, mean REST round trip `561 ms`) and the scanner still produced the varied diagnostics above. |
+| **AI Club genuinely learns** | `111 / 111` settled closes carry a post-mortem. The vault holds `64` persisted style mutations, `75` council ballots (`38` approved / `37` rejected), `72` lessons across `9` setup bands and `111` contrastive training pairs. After the `STARUSDT` premature entry the council approved `minAiConfidenceScore` `0.612000 → 0.627000` `3/3`, and `v1.6.1` then holds that target at the model's own ceiling (`0.623405` effective). The full ledger is in [§9](#9-zero-cost-self-learning-ai-agent-club). |
+| **Type-safe & verified** | `npx tsc --noEmit` → exit 0. `npx vite build` → exit 0. All **11** self-test groups → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
 
 ---
 
@@ -291,43 +293,36 @@ Every claim below was observed on a live, armed, real-money session — not asse
 
 Every round trip the engine has settled on a funded, armed session.
 
-Captured live from `snapshot.pnlLedger.stats` at `2026-10-28T22:30:48Z` — the same numbers the **PNL Ledger** panel renders. It moves with every close; the panel is always current, so this table is a photograph, not the reading.
+Captured live from `snapshot.pnlLedger.stats` at `2026-10-29T04:37:01Z` — the same numbers the **PNL Ledger** panel renders. It moves with every close; the panel is always current, so this table is a photograph, not the reading.
 
 | Readout | Value |
 | :--- | ---: |
-| Total trades | `78` |
-| Win trades / loss trades | `46` / `32` |
-| **Win rate** | `58.974359%` |
-| Long quantity / win rate | `70` / `60.000000%` |
-| Short quantity / win rate | `8` / `50.000000%` |
-| Gross PNL | `-$1.147189` |
-| Total Binance platform fees | `-$1.563932` |
-| Funding fees settled on bot symbols | `$0.000000` |
-| **Net PNL after fees** | **`-$2.711121`** |
-| Best / worst close (net) | `+$0.258004` / `-$0.309310` |
-| Avg win / avg loss (net) | `+$0.087500` / `-$0.210504` |
+| Total trades | `111` |
+| Win trades / loss trades | `66` / `45` |
+| **Win rate** | `59.459459%` |
+| Long quantity / win rate | `98` / `60.204082%` |
+| Short quantity / win rate | `13` / `53.846154%` |
+| Gross PNL | `-$0.391232` |
+| Total Binance platform fees | `-$2.225552` |
+| Funding fees settled on bot symbols | `+$0.096482` |
+| **Net PNL after fees** | **`-$2.616784`** |
+| Best / worst close (net) | `+$0.271791` / `-$0.309310` |
+| Avg win / avg loss (net) | `+$0.090347` / `-$0.190660` |
+| Starting balance / current equity | `$13.972454` / `$11.809448` |
 
-> **Read this honestly.** Win rate and net PNL disagree, and the reason is in the last two rows: the average loss is `2.41×` the average win, so this payoff needs a `70.6%` win rate to break even and the book prints `58.974359%`. Being right 59 times in 100 does not pay for a `-$0.210504` average loser next to a `+$0.087500` average winner. The table is an accounting record, not a performance claim — strategy edge remains an open question, and fees alone (`$1.563932`) exceed the entire gross result of `-$1.147189`. This is exactly the asymmetry [§9](#9-zero-cost-self-learning-ai-agent-club)'s loss autopsy is built to attack.
+> **Read this honestly.** Win rate and net PNL disagree, and the reason is in the last two rows: the average loss is `2.11×` the average win, so this payoff needs a `67.85%` win rate to break even and the book prints `59.459459%`. Being right 59 times in 100 does not pay for a `-$0.190660` average loser next to a `+$0.090347` average winner. The table is an accounting record, not a performance claim — strategy edge remains an open question, and fees alone (`$2.225552`) exceed the entire gross result of `-$0.391232` by `5.69×`. This is exactly the asymmetry [§9](#9-zero-cost-self-learning-ai-agent-club)'s loss autopsy is built to attack.
 
-### The same ledger thirty-one closes later (`v1.5.0` capture)
+### How the ledger moved
 
-Captured live from `snapshot.pnlLedger.stats` at `2026-10-29T02:52:39Z`, on the same account and the same running engine.
+The same account, measured three times on `2026-10-28/29`:
 
-| Readout | Value | `78` → `109` change |
-| :--- | ---: | :--- |
-| Total trades | `109` | `+31` |
-| Win trades / loss trades | `65` / `44` | `+19` / `+12` |
-| **Win rate** | `59.633028%` | `+0.66` points |
-| Long quantity / win rate | `96` / `60.416667%` | `+26` / `+0.42` points |
-| Short quantity / win rate | `13` / `53.846154%` | `+5` / `+3.85` points |
-| Gross PNL | `-$0.386237` | **improved `+$0.760952`** |
-| Total Binance platform fees | `-$2.185561` | `-$0.621629` more paid |
-| Funding fees settled on bot symbols | `+$0.096482` | received, not paid |
-| **Net PNL after fees** | **`-$2.571798`** | `+$0.139323` better |
-| Best / worst close (net) | `+$0.271791` / `-$0.309310` | best improved, worst unchanged |
-| Avg win / avg loss (net) | `+$0.090161` / `-$0.191643` | asymmetry `2.13:1` (was `2.41:1`) |
+| Capture | Closes | Win rate | Gross | Fees | Net | Avg win / avg loss |
+| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| `22:30:48Z` | `78` | `58.974359%` | `-$1.147189` | `$1.563932` | `-$2.711121` | `+$0.087500` / `-$0.210504` |
+| `02:52:39Z` | `109` | `59.633028%` | `-$0.386237` | `$2.185561` | `-$2.571798` | `+$0.090161` / `-$0.191643` |
+| `04:37:01Z` | `111` | `59.459459%` | `-$0.391232` | `$2.225552` | `-$2.616784` | `+$0.090347` / `-$0.190660` |
 
-**This table is the entire argument for `v1.5.0`.** Thirty-one more closes moved the win rate by `0.66` points — the learning loop is not finding a better entry, because entry accuracy was never the binding constraint. Gross PNL improved by `+$0.760952` and net improved by only `+$0.139323`, because `31` more round trips cost `$0.621629` in commission. **The strategy is now close to break-even before fees, and fees are the whole loss.** The payoff asymmetry narrowed from `2.41:1` to `2.13:1` — which still needs a `67.94%` win rate the book has never printed. Nothing about raising or lowering leverage changes this: the hurdle is `2 × taker × leverage` on margin ROI while the move available is a price move, and leverage cancels out of the ratio. That is why `v1.5.0` stops trying to win on accuracy and starts refusing trades that cannot pay for their own exit (`minFeeHurdleMultiple`) and stops giving back captured profit to a loose trail (`-6.0` guard, precedence fix, exchange-side stop).
+**This progression is the argument for `v1.5.0` and `v1.6.1`.** Thirty-three more closes after the first capture moved the win rate by less than a point: the learning loop was not finding a materially better entry, because entry accuracy was never the binding constraint. Gross improved by `+$0.755957` across those closes while `$0.661620` more commission was paid — **the strategy is close to break-even before fees, and fees are the whole loss.** The payoff asymmetry narrowed from `2.41:1` to `2.11:1`, which still needs a `67.85%` win rate the book has never printed. Nothing about raising or lowering leverage changes this: the hurdle is `2 × taker × leverage` on margin ROI while the move available is a price move, and leverage cancels out of the ratio. That is why `v1.5.0` stops trying to win on accuracy and starts refusing trades that cannot pay for their own exit (`minFeeHurdleMultiple`) and stops giving back captured profit to a loose trail (`-6.0` guard, precedence fix) — and why `v1.6.1` stops a tightening loop from ratcheting the confidence gate above what the model can output.
 
 ### First continuous session, in close order
 
@@ -424,7 +419,7 @@ Binance serves USDⓈ-M market data over two independent transports. **HFT treat
 | `/fapi/v1/ticker/24hr` (all symbols) | `40` | every `10s` | `240` |
 | `/fapi/v1/trades` (per symbol, 1000 trades) | `5` | one symbol per cursor step, full 40-symbol pass every `15s` | `800` |
 
-Total ≈ **`1,160 / 2,400` (48%)** of the `FAPI` budget while fully engaged. Measured live at **`1,036 / 2,400` (43%)** with all 40 assets receiving tape. Comfortable headroom, but it is a real cost — the fallback is not free, which is exactly why it stands down the instant the WebSocket returns. The sweep also bails immediately on rate-governor error `-9999` and resumes from its cursor rather than fighting the governor. Signed `papi` position polling runs against the **separate** `PAPI` bucket and is not included above.
+Total ≈ **`1,160 / 2,400` (48%)** of the `FAPI` budget while fully engaged. Measured while fully engaged on `2026-10-28` at **`1,036 / 2,400` (43%)** with all 40 assets receiving tape. Comfortable headroom, but it is a real cost — the fallback is not free, which is exactly why it stands down the instant the WebSocket returns. The sweep also bails immediately on rate-governor error `-9999` and resumes from its cursor rather than fighting the governor. Signed `papi` position polling runs against the **separate** `PAPI` bucket and is not included above.
 
 ### Design choices that matter
 
@@ -439,7 +434,9 @@ Total ≈ **`1,160 / 2,400` (48%)** of the `FAPI` budget while fully engaged. Me
 
 The REST tape is **price-accurate but volume-sparse** relative to a live `aggTrade` stream. Under sustained fallback, orderflow conviction readings skew toward their clamp ceiling — one verified entry recorded `orderflowDeltaRatio: 9.999999`. The strategy remains valid; its aggressor-conviction gate is simply looser than it is on the WebSocket path. **On an unblocked network the WS feed wins and REST never engages at all.** Treat fallback as *"keeps trading correct on price"*, not *"identical tape fidelity"*.
 
-The `v1.6.0` order-flow layer reads its tape from the `aggTrade` socket only. On a network where that socket is silent while REST stays healthy — the case measured here — candles keep building from the REST feed but the flow tracker's window stays empty, so every shadow verdict honestly reports `NO_SIGNAL` instead of inventing volume; in `enforce` that would refuse every entry. Feeding the REST tape into the same tracker is the next transport fix.
+The `v1.6.0` order-flow layer reads its tape from the `aggTrade` socket only. On a network where that socket is silent while REST stays healthy — the case measured here — candles keep building from the REST feed but the flow tracker's window stays empty, so every shadow verdict honestly reports `NO_SIGNAL` instead of inventing volume; in `enforce` that would refuse every entry. At `2026-10-29T04:37:01Z` the live counters read **`250` would-block verdicts, all `NO_SIGNAL`**, against `41` live books — the depth socket works, the tape socket does not, and the verdicts say exactly that. Feeding the REST tape into the same tracker is the next transport fix.
+
+> **One telemetry caveat, stated so the panel is read correctly.** `snapshot.orderFlow.tapeLive` is derived from `lastAggFrameAt`, which the WS manager stamps on a successful **handshake** ([`wsStreamManager.ts:487`](server/binance/wsStreamManager.ts#L487)). That is why it can read `true` while the tracker window holds `0` active seconds. The authoritative tape signal is `byVerdict` / the `NO_SIGNAL` lines, not that boolean. Stamping liveness on the first data frame instead of the open event is the honesty fix this layer still owes.
 
 ### Diagnosing your own transport
 
@@ -479,7 +476,7 @@ flowchart TB
         STRAT["15s Pullback + Confirmation Detector"]
         FLOW["Order Flow Layer\n(60s CVD · weighted OBI · aggressor ratio\nprice location · absorption · shadow-first)"]
         LADDER["$2.000000 Margin Executor\n(10x → 11x → 12x → 13x → 14x → 15x)"]
-        MON1S["1.000000s Position Monitor\n(+5% ROI Trail · -6% Protective Stop\n+ exchange-side STOP_MARKET)"]
+        MON1S["1.000000s Position Monitor\n(+5% ROI Trail · -6% Protective Stop\n1s software guard is the enforced exit\npapi STOP_MARKET arm refused -1116)"]
         VAULT["AES-256-GCM Local Vault\n(Fixed Start Balance + API Keys + AI Brain)"]
     end
 
@@ -558,11 +555,11 @@ Two data preconditions run first: a missing or `>5s`-old depth snapshot is **`NO
 | **Universe Size** | **40 Assets** (`20` Positive + `20` Negative) | Ranks 24h `priceChangePercent` continuously: Top 20 gainers (`LONG` only) and Top 20 losers (`SHORT` only). |
 | **Execution Timeframe** | **15-Second (`15s`) Candles** | Real-time UTC-aligned `15,000ms` candles from `<symbol>@aggTrade` WebSocket ticks, **or the REST `/fapi/v1/trades` sweep when the stream starves**, plus `/fapi/v1/aggTrades` warmup. |
 | **Base Margin / Trade** | **`$2.000000` USDT** | Dedicated base margin per position entry. |
-| **Fee Hurdle Gate** | **`2.00x` round-trip taker cost (`minFeeHurdleMultiple`)** | Before an entry is approved, the 15-second ATR excursion is compared against the round-trip taker cost (`2 × feeRate × notional`). A candidate that cannot expectedly move at least **twice** its own round-trip cost is rejected outright and its symbol gets a `20s` cooldown, so the book stops paying fees on moves too small to ever net positive. The multiple is a council-tunable parameter, not a constant. |
+| **Fee Hurdle Gate** | **`2.00x` round-trip taker cost (`minFeeHurdleMultiple`)** | Before an entry is approved, the 15-second ATR excursion is compared against the round-trip taker cost expressed as ROI on margin: `2 × takerRate × leverage × 100` (plus spread in the order-flow path). A candidate that cannot expectedly move at least **twice** its own round-trip cost is rejected outright and its symbol gets a `20s` cooldown, so the book stops paying fees on moves too small to ever net positive. Leverage cancels out of that ratio, so no ladder rung makes a small move affordable. The multiple is a council-tunable parameter, not a constant. |
 | **Order Flow Gate** | **Six gates over a rolling `60s` window — `shadow` by default** | `server/engine/orderFlowStrategy.ts` scores every `15s` trigger from the top-20 depth book (`@depth20@500ms`) and the executed tape: fee-plus-spread cost, OBI, CVD level+slope, aggressive buy/sell ratio, price location in the window's range, and absorption. Defaults: OBI `±0.20`, ratio `1.50x` (reciprocal `0.67x` for `SHORT`), absorption `1.60x`, minimum `5` active tape seconds, `5s` book freshness. In `shadow` the verdict is counted and logged as `WOULD-ENTER`/`WOULD-BLOCK` and nothing is refused; `enforce` vetoes a non-confirming verdict and cools the symbol `20s`. Operator-switched, never council-switched; the four thresholds are council-tunable. |
 | **Leverage Fallback Ladder** | **`10x → 11x → 12x → 13x → 14x → 15x`** | Attempts `10x` first. If order execution, `MIN_NOTIONAL`, or `LOT_SIZE` `minQty`/`stepSize` fails at `10x`, automatically escalates `11x`, `12x`, `13x`, `14x`, up to `15x`. Only a **pre-fill** rejection may escalate; an ambiguous answer is resolved by reading `GET /papi/v1/um/order?origClientOrderId` before any re-send, so a ladder step can never double-fill. |
 | **Profit Target & Trail** | **`+5.000000%` ROI → Trailing Stop** | The instant ROI hits `+5.000000%`, Trailing Stop arms, locks a fee-positive profit floor, and trails peak ROI dynamically to capture maximum profit. |
-| **Protective Stop** | **`-6.000000%` ROI** (`-9.500000%` before `v1.5.0`) | Hard catastrophic-exposure floor on every open position, independent of the trail, evaluated **before** the trailing branch so a breach can never be re-labelled a trailing exit. Every position also carries an **exchange-side `STOP_MARKET`** (`closePosition:'true'`, `workingType:'MARK_PRICE'`, `priceProtect:'TRUE'`) placed at open, so the floor survives a dead process or a `1s` poll gap. The **achieved** exit can still be worse than the guard — one `FIGHTUSDT` close landed at `-12.090464%` against the old `-9.500000%` level because a thin perpetual gapped through the stop between polls. Budget for `guard + slippage`, not `guard`. |
+| **Protective Stop** | **`-6.000000%` ROI** (`-9.500000%` before `v1.5.0`) | Hard catastrophic-exposure floor on every open position, independent of the trail, evaluated **before** the trailing branch so a breach can never be re-labelled a trailing exit. The engine also attempts an **exchange-side `STOP_MARKET`** (`closePosition:'true'`, `workingType:'MARK_PRICE'`, `priceProtect:'TRUE'`) at open, but **papi refuses that arm with `-1116`** (`STOP_MARKET` belongs at `/papi/v1/um/conditional/order`), so the `1s` software guard is the enforced exit today and each failed arm is logged under `EXCHANGE_STOP`. The **achieved** exit can still be worse than the guard — one `FIGHTUSDT` close landed at `-12.090464%` against the old `-9.500000%` level because a thin perpetual gapped through the stop between polls. Budget for `guard + slippage`, not `guard`. |
 | **Open Trade Check** | **Every `1.000000` Second** | Dedicated 1-second heartbeat reconciled with `/papi/v1/um/positionRisk` + live mark prices from `!markPrice@arr@1s` **or** the 1s REST price poll. |
 | **Capital Allocation Cap** | **`95.000000%` of Equity** | Uses up to 95% of unified `accountEquity` for trade execution. When free budget in the 95% pool drops below `$2.000000`, **Market Scanner automatically pauses** and focuses 100% on open running positions. |
 | **Start Balance Rule** | **Fixed on 1st API Connection** | Captured automatically the very first time Binance API connects and locked permanently until you click **Reset Start Balance** in Settings. |
@@ -664,12 +661,13 @@ Post-mortem is now `forensicAuditor → improvementDraft → councilVote → app
 
 ### What the loop has actually produced so far
 
-This is not a demo mode, and the artifacts are inspectable on disk rather than asserted here. Counted from the live vault and the same `2026-10-28T22:30:48Z` snapshot as [§2](#2-execution-ledger--live-verified):
+This is not a demo mode, and the artifacts are inspectable on disk rather than asserted here. Counted from `./data/hft_vault.json` and the `2026-10-29T04:37:01Z` snapshot as [§2](#2-execution-ledger--live-verified):
 
-- **78 of 78** settled closes carry a real post-mortem (`verdict`, `whatWorkedBest`, `whatWeMissed`, `styleAdjustments`, `mfeCaptureRatio`, `brierLoss`).
-- **55 style mutations** are appended to the persistent ledger — each records the parameter, its value before, its value after, and the trade that justified it. `trailingFloorRoiPct` `3.650000 → 3.770000`, `minAiConfidenceScore` `0.544 → 0.536`, `max24hOverextensionPct → 82.500000` are live values, not defaults. The dashboard shows the most recent 30.
-- **78 contrastive training pairs** written to `./data/nimble_kev_training_pairs.jsonl`, one per settled close, with the entry feature snapshot (`orderflowDeltaRatio`, `rsi15s`, `pullbackDepthPct`) captured at the moment of entry so the post-mortem compares against the *decision input*, not the current market.
-- **39 lessons across 7 setup bands** in shared memory (`snapshot.lessonPatterns`), read back on every candidate before an agent votes.
+- **111 of 111** settled closes carry a real post-mortem (`verdict`, `whatWorkedBest`, `whatWeMissed`, `styleAdjustments`, `mfeCaptureRatio`, `brierLoss`, `autopsy`, `councilBallots`).
+- **64 style mutations** are persisted in the vault — each records the parameter, its value before, its value after, and the trade that justified it. The snapshot sends the most recent `30` to the dashboard; `trailingFloorRoiPct` `3.890000 → 4.010000 → 4.130000` and `minAiConfidenceScore` `0.612000 → 0.627000` are live values, not defaults. `94` individual adjustments were approved across `64` of the closes.
+- **75 council ballots** — `38` approved, `37` rejected. A rejected proposal is kept on the record with each seat's reason rather than discarded.
+- **111 contrastive training pairs** written to `./data/nimble_kev_training_pairs.jsonl`, one per settled close, with the entry feature snapshot (`orderflowDeltaRatio`, `rsi15s`, `pullbackDepthPct`) captured at the moment of entry so the post-mortem compares against the *decision input*, not the current market. The live System-1 weights have absorbed all `111` updates: Brier EMA `0.2969346`, temperature `1.372`, `111` pairs counted.
+- **72 lessons across 9 setup bands** in shared memory (`snapshot.lessonPatterns`), read back on every candidate before an agent votes.
 - All of it at **`$0.00` inference cost** — no LLM call is made on either path. Inspect the mutated set any time in `snapshot.styleParams`.
 
 ### The council has ruled in production
@@ -716,7 +714,7 @@ Start Balance and Current Equity are seven-segment LED readouts (`src/components
 - **Punctuation is drawn, not typed.** DSEG's period occupies a full digit advance, which would punch a hole in the number; the dot is a `0.26em` element on the baseline and the minus is a drawn bar. Neither moves the columns.
 - **Equity changes colour on its own meaning**: mint `#ADEBB3` while ahead of the locked start balance, coral `#FF857A` once behind it. Start balance stays orchid — it is a reference, not a result.
 - **Nothing reflows.** Glyph height is driven by one media query (`26px` ≥`640px`, `22px` below); columns are `0.72em` wide, the type is set at `0.94em` of the row so metric rounding cannot clip the ink, and the bloom is a static two-layer `drop-shadow`, not an animation.
-- **A screen reader never sees segments.** Each readout is `role="img"` with `aria-label="Current equity 11.850675 USDT, behind start balance"` (the exact `0.000000` figure, not the cents the odometer shows), and every glyph is `aria-hidden`.
+- **A screen reader never sees segments.** Each readout is `role="img"` with `aria-label="Current equity 11.809448 USDT, behind start balance"` (the exact `0.000000` figure, not the cents the odometer shows), and every glyph is `aria-hidden`.
 - **`prefers-reduced-motion` renders a static glyph** instead of animating, and the slot LEDs stop pulsing.
 
 Open-trade slots carry their own signal: a slow `1.5s` mint pulse while the position is net-positive, a fast `0.8s` coral alarm while net-negative, driven by **net** PNL after fees — because a position that is gross-positive and net-negative is losing money. Trailing-stop arming keeps a separate orchid ring so "in profit" and "the predator is armed" are not the same light doing two jobs. **Colour is never the only carrier**: the same state prints a `TrendingUp`/`TrendingDown` glyph and an `sr-only` "net profit" / "net loss" reading, so the row survives a colour-blind eye, a grayscale print, and a screen reader.
@@ -956,7 +954,7 @@ hft/
 │   │   └── candleBuilder15s.ts   # 15s OHLCV + Orderflow Delta aggregator · seals only elapsed windows, never fabricates bars
 │   ├── engine/
 │   │   ├── stateStore.ts         # Atomic encrypted vault & persistent Start Balance / AI brain / standing orders
-│   │   ├── restMarketFeed.ts     # REST standby feed: 1s prices · 10s 24h · round-robin tape sweep + trade-ID dedup
+│   │   ├── restMarketFeed.ts     # REST standby feed: 1s prices · 10s 24h · round-robin tape sweep + trade-ID dedup (candles only; the flow tracker reads the WS tape)
 │   │   ├── marketScanner.ts      # Top-40 (20 Pos / 20 Neg) 24h USDT-M scanner + 95% pause logic
 │   │   ├── strategy15s.ts        # 15s Pullback + Bullish/Bearish Confirmation detector
 │   │   ├── orderFlowTracker.ts   # 1s executed-tape buckets: quote CVD, slope, aggressor ratio & aggression multiples
