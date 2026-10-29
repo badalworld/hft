@@ -35,6 +35,7 @@ import {
   type CouncilContext,
   type MutationProposal,
 } from './improvementCouncil.js';
+import { NexusStrategyArchitect } from './strategyArchitect.js';
 import { clamp, f6 } from '../utils/format.js';
 import { logger } from '../utils/logger.js';
 
@@ -116,6 +117,16 @@ export function createInitialAgents(): AgentMemberStatus[] {
       lastUpdatedAt: now,
       active: true,
     },
+    {
+      id: 'nexus-strategist',
+      name: 'Nexus Strategy Architect',
+      role: 'Autonomous Strategy Synthesizer & Memory Evolution',
+      framework: 'LangGraph + Dynamic Strategy Brain',
+      decisionsCount: 0,
+      lastAction: 'Synthesizing profitable strategies from live positions and trade memory.',
+      lastUpdatedAt: now,
+      active: true,
+    },
   ];
 }
 
@@ -183,6 +194,8 @@ export class AiAgentClubOrchestrator {
   private operatorNotes: OperatorNote[];
   /** Scores the judge has actually emitted, so the gate can be held inside their range. */
   private readonly scoreWindow = new EmpiricalScoreWindow();
+  /** 6th AI Agent: Autonomous Strategy Synthesizer & Brain Evolution */
+  private readonly strategyArchitect = new NexusStrategyArchitect();
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private compiledEntryGraph: any;
@@ -198,6 +211,10 @@ export class AiAgentClubOrchestrator {
     operatorNotes?: OperatorNote[];
   }) {
     this.agents = init.agents?.length ? init.agents : createInitialAgents();
+    if (!this.agents.some((a) => a.id === 'nexus-strategist')) {
+      const initNexus = createInitialAgents().find((a) => a.id === 'nexus-strategist');
+      if (initNexus) this.agents.push(initNexus);
+    }
     this.styleParams = init.styleParams;
     this.system1Weights = init.system1Weights;
     this.localConfig = init.localConfig;
@@ -206,10 +223,23 @@ export class AiAgentClubOrchestrator {
 
     this.compiledEntryGraph = this.buildEntryStateGraph();
     this.compiledPostMortemGraph = this.buildPostMortemStateGraph();
+    this.strategyArchitect.evolveStrategyBrain([], this.lessons, this.styleParams);
   }
 
   public getAgents(): AgentMemberStatus[] {
-    return this.agents;
+    return this.agents.map((a) => this.strategyArchitect.decorateAgentStatus(a));
+  }
+
+  public getStrategyBrain() {
+    return this.strategyArchitect.getMemory();
+  }
+
+  public evaluateRunningPositions(openPositions: any[]) {
+    this.strategyArchitect.evaluateRunningPositions(openPositions);
+  }
+
+  public evolveStrategyBrain(closedTrades: any[]) {
+    return this.strategyArchitect.evolveStrategyBrain(closedTrades, this.lessons, this.styleParams);
   }
 
   public getLessons(): TradeLesson[] {
@@ -1002,6 +1032,40 @@ export class AiAgentClubOrchestrator {
       analysis
     );
     this.absorbLesson(lesson);
+
+    // Evolve Nexus Strategy Brain from the newly closed trade and updated lessons
+    try {
+      this.strategyArchitect.evolveStrategyBrain(
+        [
+          {
+            id: lesson.id,
+            symbol: params.symbol,
+            side: params.side,
+            leverage: params.leverage,
+            quantity: 0,
+            entryPrice: params.entryPrice,
+            exitPrice: params.exitPrice,
+            initialMargin: params.initialMargin,
+            grossPnl: params.grossPnl,
+            binanceFees: params.binanceFees,
+            netPnl: params.netPnl,
+            finalRoiPct: params.finalRoiPct,
+            peakRoiPct: params.peakRoiPct,
+            worstRoiPct: params.worstRoiPct,
+            openedAt: Date.now() - params.durationSec * 1000,
+            closedAt: Date.now(),
+            durationSec: params.durationSec,
+            exitReason: params.exitReason,
+            entryFeatures: params.features,
+            postMortem: analysis,
+          },
+        ],
+        this.lessons,
+        this.styleParams
+      );
+    } catch {
+      // non-blocking
+    }
 
     let mutationRecord: StyleMutationRecord | null = null;
     if (out.mutations && out.mutations.length > 0) {
