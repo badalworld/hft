@@ -18,13 +18,14 @@ export interface EndpointCheck {
   normalizedUrl: string;
 }
 
-const ALLOWED_DNS_HOSTS = new Set(['localhost']);
+const ALLOWED_DNS_HOSTS = new Set(['localhost', 'api.threerouter.com']);
 
 export const LOCAL_DECISION_PROVIDERS: LocalDecisionProvider[] = [
   'builtin',
   'ollama_nimble',
   'laya_http',
   'kev_http',
+  'threerouter',
 ];
 
 /**
