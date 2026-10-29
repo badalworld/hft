@@ -380,7 +380,7 @@ export interface AdaptiveStyleParams {
   orderFlowAbsorptionMultiple: number;// Aggression vs its own baseline before a move counts as absorbed
 }
 
-export type LocalDecisionProvider = 'builtin' | 'ollama_nimble' | 'laya_http' | 'kev_http';
+export type LocalDecisionProvider = 'builtin' | 'ollama_nimble' | 'laya_http' | 'kev_http' | 'threerouter';
 
 export interface LocalDecisionConfig {
   provider: LocalDecisionProvider;
