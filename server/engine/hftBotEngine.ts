@@ -224,6 +224,13 @@ export class HftBotEngine {
     // internally, so the 1s heartbeat can call it freely afterwards.
     await this.incomeLedger.sync(true);
 
+    // Seed Nexus Strategy Brain evolution from persisted closed trades
+    try {
+      this.aiClub.evolveStrategyBrain(this.stateStore.getClosedTradeHistory());
+    } catch {
+      // non-blocking
+    }
+
     // 4. Start exact 1-second real-time loop
     if (!this.mainLoopTimer) {
       this.mainLoopTimer = setInterval(() => {
@@ -543,6 +550,10 @@ export class HftBotEngine {
 
   private async runOneSecondHeartbeat() {
     this.tickCounter++;
+
+    // Evaluate running positions against Nexus Strategy Brain
+    const runningPositions = this.positionMonitor.getOpenPositionsList();
+    this.aiClub.evaluateRunningPositions(runningPositions);
 
     // Retry exchangeInfo periodically if offline at startup
     if (!this.exchangeInfoLoaded && this.tickCounter % 15 === 0) {
@@ -1540,6 +1551,7 @@ export class HftBotEngine {
       system1Weights: this.aiClub.getSystem1Weights(),
       localDecisionConfig: this.aiClub.getLocalDecisionConfig(),
       agents: this.aiClub.getAgents(),
+      strategyBrain: this.aiClub.getStrategyBrain(),
       recentClosedTrades: stats.closedTrades,
       styleMutations: stats.styleMutations,
       winCount: stats.winCount,
