@@ -10,11 +10,7 @@ import { logger } from '../utils/logger.js';
 // classic Futures hosts. Everything signed goes to papi, because this account is
 // a Portfolio Margin account: its funds live in the unified PM wallet and the key
 // carries enablePortfolioMarginTrading rather than enableFutures.
-const BINANCE_FAPI_HOSTS = [
-  'fapi.binance.com',
-  'fapi1.binance.com',
-  'fapi2.binance.com',
-];
+const BINANCE_FAPI_HOSTS = ['fapi.binance.com'];
 
 const BINANCE_PAPI_HOSTS = ['papi.binance.com'];
 
@@ -311,17 +307,25 @@ export class BinanceFuturesRestClient {
 
   public async syncServerTime(): Promise<number> {
     const localBefore = Date.now();
-    const res = await this.rawRequest<{ serverTime: number }>({
-      method: 'GET',
-      path: '/fapi/v1/time',
-      priority: 'P2_ACCOUNT_SYNC',
-      weight: 1,
-    });
-    const localAfter = Date.now();
-    const midpoint = Math.round((localBefore + localAfter) / 2);
-    this.timeOffsetMs = res.serverTime - midpoint;
-    this.rateGovernor.serverTimeOffsetMs = this.timeOffsetMs;
-    return this.timeOffsetMs;
+    try {
+      const res = await this.rawRequest<{ serverTime: number }>({
+        method: 'GET',
+        path: '/fapi/v1/time',
+        priority: 'P2_ACCOUNT_SYNC',
+        weight: 1,
+      });
+      const localAfter = Date.now();
+      const midpoint = Math.round((localBefore + localAfter) / 2);
+      this.timeOffsetMs = res.serverTime - midpoint;
+      this.rateGovernor.serverTimeOffsetMs = this.timeOffsetMs;
+      return this.timeOffsetMs;
+    } catch (err) {
+      if ((err as BinanceApiError)?.code === -9999) {
+        // Rate governor protected budget - keep existing time offset gracefully
+        return this.timeOffsetMs;
+      }
+      throw err;
+    }
   }
 
   public async loadExchangeInfo(): Promise<number> {
