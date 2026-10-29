@@ -1249,7 +1249,7 @@ export class HftBotEngine {
       const code = (err as { code?: number }).code;
       this.exchangeStopFailures += 1;
       // A parameter this endpoint will never accept: stop asking and rely on the software guard.
-      if (code === -1106 || code === -1117 || code === -4040 || code === -4062) {
+      if (code === -1106 || code === -1116 || code === -1117 || code === -4040 || code === -4062) {
         this.exchangeStopsDisabled = true;
         logger.error(
           'EXCHANGE_STOP',
