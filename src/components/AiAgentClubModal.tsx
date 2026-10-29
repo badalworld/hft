@@ -330,12 +330,12 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
         </div>
 
         <div className="space-y-5">
-          {/* 1. 5 SPECIALIZED LANGGRAPH AGENTS */}
+          {/* 1. 6 SPECIALIZED LANGGRAPH AGENTS */}
           <div className="skeuo-plate rounded-xl p-4">
             <div className="mb-3 flex items-center gap-2">
               <Sparkles className="h-4 w-4 text-[#EBAEE6]" />
               <h3 className="text-xs font-bold uppercase tracking-[0.14em] text-white">
-                Active 5-Agent LangGraph Quant Club
+                Active 6-Agent LangGraph Quant Club (Self-Learning Brain)
               </h3>
             </div>
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
@@ -721,7 +721,112 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
             )}
           </div>
 
-          {/* 3c. OPERATOR BRIEFING — the human's direct channel into the club */}
+          {/* 3c. NEXUS STRATEGY BRAIN — AUTONOMOUS STRATEGY SYNTHESIZER */}
+          <div className="skeuo-plate rounded-xl p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <div className="skeuo-oled flex h-7 w-7 items-center justify-center rounded-lg border border-[#ADEBB3]/40">
+                  <Cpu className="h-3.5 w-3.5 text-[#ADEBB3]" />
+                </div>
+                <div>
+                  <h3 className="text-xs font-bold uppercase tracking-[0.14em] text-white">
+                    Nexus Strategy Brain — Autonomous Strategy Synthesizer
+                  </h3>
+                  <div className="text-[10px] text-[#c7a8a5]">
+                    Self-evolving memory matrix mining running positions & closed trade payoffs
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="rounded border border-[#ADEBB3]/40 bg-[#ADEBB3]/10 px-2 py-0.5 font-mono-num text-[10px] font-bold text-[#ADEBB3]">
+                  Ranked #1: {snapshot?.strategyBrain?.topStrategyName ?? 'Deep Pullback Delta Sniper'}
+                </span>
+                <span className="font-mono-num text-[10px] text-[#b99895]">
+                  Syntheses #{snapshot?.strategyBrain?.totalSyntheses ?? 1}
+                </span>
+              </div>
+            </div>
+
+            {/* Strategy Archetypes Matrix */}
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              {(snapshot?.strategyBrain?.archetypes ?? []).map((arch) => (
+                <div key={arch.id} className="skeuo-oled rounded-xl p-3 text-xs">
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="font-bold text-white">{arch.name}</span>
+                    <span
+                      className={`rounded px-1.5 py-0.5 font-mono-num text-[9px] font-bold uppercase tracking-wider ${
+                        arch.status === 'ACTIVE_ALPHA'
+                          ? 'border border-[#ADEBB3]/50 bg-[#ADEBB3]/20 text-[#ADEBB3]'
+                          : arch.status === 'REJECTED'
+                          ? 'border border-[#FF857A]/50 bg-[#FF857A]/20 text-[#FF857A]'
+                          : 'border border-[#EBAEE6]/50 bg-[#EBAEE6]/20 text-[#EBAEE6]'
+                      }`}
+                    >
+                      {arch.status.replace('_', ' ')}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[10px] leading-relaxed text-[#c7a8a5]">
+                    {arch.description}
+                  </p>
+                  <div className="mt-2 grid grid-cols-4 gap-1.5 border-t border-[#EBAEE6]/10 pt-2 font-mono-num text-[10px]">
+                    <div>
+                      <span className="block text-[8px] uppercase text-[#a98b88]">Win Rate</span>
+                      <span
+                        className={`font-bold ${
+                          arch.winRatePct >= 60 ? 'text-[#ADEBB3]' : 'text-[#FF857A]'
+                        }`}
+                      >
+                        {arch.winRatePct.toFixed(1)}%
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[8px] uppercase text-[#a98b88]">Expected Val</span>
+                      <span className="font-bold text-[#ADEBB3]">
+                        +{arch.expectedValueRoiPct.toFixed(2)}%
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[8px] uppercase text-[#a98b88]">Profit Factor</span>
+                      <span className="font-bold text-[#EBAEE6]">
+                        {arch.profitFactor.toFixed(2)}x
+                      </span>
+                    </div>
+                    <div>
+                      <span className="block text-[8px] uppercase text-[#a98b88]">Samples</span>
+                      <span className="font-bold text-[#fdf6f5]">
+                        {arch.sampleCount} ({arch.winCount}W/{arch.lossCount}L)
+                      </span>
+                    </div>
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[9px] font-mono-num text-[#b99895]">
+                    <span>RSI [{arch.idealRsiRange[0]}..{arch.idealRsiRange[1]}]</span>
+                    <span>Delta &gt;= {arch.minDeltaRatio.toFixed(2)}x</span>
+                    <span>Leverage {arch.optimalLeverage}x</span>
+                    <span className="ml-auto text-[#ADEBB3]">Confidence {(arch.confidenceScore * 100).toFixed(0)}%</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Live Autonomous Brain Insights */}
+            {(snapshot?.strategyBrain?.liveInsights ?? []).length > 0 && (
+              <div className="mt-3 rounded-lg border border-[#ADEBB3]/20 bg-[#ADEBB3]/[0.04] p-2.5">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-[#ADEBB3]">
+                  Autonomous Brain Memory Insights
+                </div>
+                <ul className="mt-1 space-y-0.5 text-[10px] text-[#f4e5e3]">
+                  {snapshot?.strategyBrain?.liveInsights.map((ins, idx) => (
+                    <li key={idx} className="flex items-start gap-1.5">
+                      <span className="text-[#ADEBB3]">•</span>
+                      <span>{ins}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+
+          {/* 3d. OPERATOR BRIEFING — the human's direct channel into the club */}
           <div className="skeuo-plate skeuo-lotus-trim rounded-xl p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
