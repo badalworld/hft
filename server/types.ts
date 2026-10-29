@@ -401,6 +401,35 @@ export interface AgentMemberStatus {
   active: boolean;
 }
 
+export interface DiscoveredStrategyArchetype {
+  id: string;
+  name: string;
+  archetype: 'DEEP_PULLBACK_SNIPER' | 'MOMENTUM_BREAKOUT_WAVE' | 'REVERSION_EXHAUSTION' | 'MICRO_VOLATILITY_BURST';
+  description: string;
+  winRatePct: number;
+  sampleCount: number;
+  winCount: number;
+  lossCount: number;
+  netPnlTotal: number;
+  profitFactor: number;
+  expectedValueRoiPct: number;
+  idealRsiRange: [number, number];
+  minDeltaRatio: number;
+  optimalLeverage: number;
+  confidenceScore: number;
+  status: 'ACTIVE_ALPHA' | 'INCUBATING' | 'REJECTED';
+  lastEvaluatedAt: number;
+}
+
+export interface StrategyBrainMemory {
+  totalSyntheses: number;
+  lastSynthesizedAt: number;
+  topStrategyId: string | null;
+  topStrategyName: string;
+  archetypes: DiscoveredStrategyArchetype[];
+  liveInsights: string[];
+}
+
 export interface StyleMutationRecord {
   id: string;
   timestamp: number;
@@ -593,6 +622,7 @@ export interface DashboardSnapshot {
   system1Weights: System1Weights;
   localDecisionConfig: LocalDecisionConfig;
   agents: AgentMemberStatus[];
+  strategyBrain?: StrategyBrainMemory;
   recentClosedTrades: ClosedTradeRecord[];
   styleMutations: StyleMutationRecord[];
   winCount: number;
