@@ -12,6 +12,8 @@ export type {
   LocalDecisionProvider,
   LocalDecisionConfig,
   AgentMemberStatus,
+  DiscoveredStrategyArchetype,
+  StrategyBrainMemory,
   StyleMutationRecord,
   System1Weights,
   IncomeLedgerSummary,
