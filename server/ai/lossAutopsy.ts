@@ -30,6 +30,17 @@ export interface AutopsyInput {
   exitReason: string;
   features: EntryFeatureVector;
   params: AdaptiveStyleParams;
+  /**
+   * The guard value that was live when this position filled. The council can tighten or
+   * loosen afterwards, and a post-mortem that re-judges an old exit against a newer level
+   * invents a slippage that never happened (or hides a real one).
+   */
+  entryGuardRoiPct?: number;
+}
+
+/** The guard the trade was actually managed against. */
+function liveGuardRoiPct(i: AutopsyInput): number {
+  return typeof i.entryGuardRoiPct === 'number' ? i.entryGuardRoiPct : i.params.protectiveStopRoiPct;
 }
 
 /** ROI the position had to reach just to pay for its own round trip. */
@@ -69,7 +80,14 @@ function classify(i: AutopsyInput): { cause: LossRootCause; contributing: LossRo
   const hurdle = feeHurdleRoiPct(i.binanceFees, i.initialMargin);
   const move = signedMovePct(i.side, i.entryPrice, i.exitPrice);
   const stopExit = /STOP_LOSS|PROTECTIVE/i.test(i.exitReason) && !/TRAILING/i.test(i.exitReason);
-  const overshootPct = i.params.protectiveStopRoiPct - i.finalRoiPct;
+  const overshootPct = liveGuardRoiPct(i) - i.finalRoiPct;
+  // Slippage must be measured in the unit the book actually moves — the underlying
+  // price, not ROI. At 10x, 4% of ROI overshoot is a 0.40% price slip, which is what a
+  // thin alt perp prints on any cascade; calling that a depth failure blames the exit
+  // and lets a bad entry off the hook. Only a real hole through the guard qualifies.
+  const leverage = Math.max(1, i.leverage || 10);
+  const overshootMovePct = overshootPct / leverage;
+  const depthFailure = stopExit && overshootPct >= 1 && overshootMovePct >= 0.5;
   const giveBackPct = i.peakRoiPct - i.finalRoiPct;
   const giveBackRatio = i.peakRoiPct > 0.5 ? clamp(giveBackPct / i.peakRoiPct, 0, 2) : 0;
 
@@ -80,7 +98,7 @@ function classify(i: AutopsyInput): { cause: LossRootCause; contributing: LossRo
   if (move < 0 && i.features.absChange24hPct >= 45) causes.push('ENTRY_INTO_SPENT_MOVE');
   if (i.worstRoiPct <= -4 && i.peakRoiPct < 2) causes.push('ENTRY_TOO_EARLY');
 
-  if (stopExit && overshootPct > 1) return { cause: 'EXIT_SLIPPAGE', contributing: causes };
+  if (depthFailure) return { cause: 'EXIT_SLIPPAGE', contributing: causes };
   if (i.peakRoiPct >= i.params.trailingTriggerRoiPct && giveBackRatio > 0.4)
     return { cause: 'TRAIL_TOO_LOOSE', contributing: causes };
   if (i.grossPnl > 0 && i.netPnl <= 0) return { cause: 'FEE_DRAG', contributing: causes };
@@ -141,12 +159,13 @@ export function diagnoseLoss(i: AutopsyInput): LossAutopsy {
 
   switch (cause) {
     case 'EXIT_SLIPPAGE': {
-      const overshoot = i.finalRoiPct - i.params.protectiveStopRoiPct;
-      whyItHappened = `${head} the protective guard is ${f6(i.params.protectiveStopRoiPct)}% ROI but the fill printed ${f6(
+      const guard = liveGuardRoiPct(i);
+      const overshoot = i.finalRoiPct - guard;
+      whyItHappened = `${head} the protective guard was ${f6(guard)}% ROI but the fill printed ${f6(
         i.finalRoiPct
       )}% — ${f6(Math.abs(overshoot))}% through the level. A stop is a promise about price, and on a thin alt-perp book during a cascade that promise is only worth the depth sitting inside the spread. The order was right; the size was too big for the liquidity available at the worst moment.`;
       avoidanceRule = `Stand down on ${i.symbol} unless the 15s range can carry this position out at no more than ${f6(
-        i.params.protectiveStopRoiPct
+        guard
       )}% ROI. A guard that overshoots by more than 1% is a depth problem, and depth does not improve when the market is falling.`;
       executionUpdate = `Cut ${i.side} size on this band until a stop fill lands within 1% of the guard, and treat a market-exit fill beyond the guard as a hard veto on re-entry in the same move.`;
       break;

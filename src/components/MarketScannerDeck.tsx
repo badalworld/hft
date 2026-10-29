@@ -65,6 +65,73 @@ const StageBadge: React.FC<{ stage: ScannerAsset['stage']; side: 'LONG' | 'SHORT
   );
 };
 
+/**
+ * The snapshot re-arrives roughly once a second and every asset object is new, so a plain
+ * memo would never hit. Comparing the printed fields lets a bank of 20 rows re-render only
+ * the handful whose numbers actually moved.
+ */
+const ScannerRow: React.FC<{ asset: ScannerAsset; side: 'LONG' | 'SHORT' }> = React.memo(
+  ({ asset, side }) => {
+    const isLong = side === 'LONG';
+    return (
+      <tr title={asset.lastSignalReason} className="transition-colors hover:bg-[#6B403C]/22">
+        <td className="py-2 pl-3 pr-2 font-mono-num text-[10px] text-[#b99895]">
+          {String(asset.rank).padStart(2, '0')}
+        </td>
+        <td className="px-2 py-2">
+          <div className="font-mono-num font-bold text-[#fdf6f5]">{asset.symbol}</div>
+          <div className="font-mono-num text-[9px] text-[#b99895]">
+            {asset.candleCount15s} bars • {asset.recommendedLeverage}x-15x
+          </div>
+          {asset.substitutedFor && (
+            <div
+              title={`${asset.substitutedFor} is cooling; this slot was re-awarded to the next-ranked mover.`}
+              className="mt-0.5 inline-flex items-center gap-1 rounded border border-[#D9A441]/45 bg-[#D9A441]/12 px-1.5 py-[1px] font-mono-num text-[9px] text-[#D9A441]"
+            >
+              <RefreshCw className="h-2.5 w-2.5" />
+              {asset.substitutedFor.replace('USDT', '')} out
+            </div>
+          )}
+        </td>
+        <td
+          className={`px-2 py-2 text-right font-mono-num font-bold ${
+            isLong ? 'text-[#ADEBB3]' : 'text-[#FF857A]'
+          }`}
+        >
+          {fmtSigned6(asset.priceChangePercent24h)}%
+        </td>
+        <td className="px-2 py-2 text-right font-mono-num text-[#f2dedc]">
+          {fmt6(asset.lastPrice)}
+        </td>
+        <td className="px-2 py-2 text-right font-mono-num text-[#f2dedc]">
+          {fmt6(asset.pullbackDepthPct)}%
+        </td>
+        <td className="px-2 py-2 text-right font-mono-num text-[10px] text-[#f2dedc]">
+          <div>RSI {fmt6(asset.rsi15s)}</div>
+          <div className="text-[#EBAEE6]">Δ {fmt6(asset.orderflowDeltaRatio)}x</div>
+        </td>
+        <td className="py-2 pl-2 pr-3 text-right">
+          <StageBadge stage={asset.stage} side={side} />
+        </td>
+      </tr>
+    );
+  },
+  (prev, next) =>
+    prev.side === next.side &&
+    prev.asset.symbol === next.asset.symbol &&
+    prev.asset.rank === next.asset.rank &&
+    prev.asset.stage === next.asset.stage &&
+    prev.asset.lastPrice === next.asset.lastPrice &&
+    prev.asset.priceChangePercent24h === next.asset.priceChangePercent24h &&
+    prev.asset.pullbackDepthPct === next.asset.pullbackDepthPct &&
+    prev.asset.rsi15s === next.asset.rsi15s &&
+    prev.asset.orderflowDeltaRatio === next.asset.orderflowDeltaRatio &&
+    prev.asset.candleCount15s === next.asset.candleCount15s &&
+    prev.asset.recommendedLeverage === next.asset.recommendedLeverage &&
+    prev.asset.substitutedFor === next.asset.substitutedFor &&
+    prev.asset.lastSignalReason === next.asset.lastSignalReason
+);
+
 const ScannerTableBank: React.FC<{
   title: string;
   subtitle: string;
@@ -128,52 +195,7 @@ const ScannerTableBank: React.FC<{
             </thead>
             <tbody className="divide-y divide-[#EBAEE6]/[0.06]">
               {assets.map((asset) => (
-                <tr
-                  key={asset.symbol}
-                  title={asset.lastSignalReason}
-                  className="transition-colors hover:bg-[#6B403C]/22"
-                >
-                  <td className="py-2 pl-3 pr-2 font-mono-num text-[10px] text-[#b99895]">
-                    {String(asset.rank).padStart(2, '0')}
-                  </td>
-                  <td className="px-2 py-2">
-                    <div className="font-mono-num font-bold text-[#fdf6f5]">
-                      {asset.symbol}
-                    </div>
-                    <div className="font-mono-num text-[9px] text-[#b99895]">
-                      {asset.candleCount15s} bars • {asset.recommendedLeverage}x-15x
-                    </div>
-                    {asset.substitutedFor && (
-                      <div
-                        title={`${asset.substitutedFor} is cooling; this slot was re-awarded to the next-ranked mover.`}
-                        className="mt-0.5 inline-flex items-center gap-1 rounded border border-[#D9A441]/45 bg-[#D9A441]/12 px-1.5 py-[1px] font-mono-num text-[9px] text-[#D9A441]"
-                      >
-                        <RefreshCw className="h-2.5 w-2.5" />
-                        {asset.substitutedFor.replace('USDT', '')} out
-                      </div>
-                    )}
-                  </td>
-                  <td
-                    className={`px-2 py-2 text-right font-mono-num font-bold ${
-                      isLong ? 'text-[#ADEBB3]' : 'text-[#FF857A]'
-                    }`}
-                  >
-                    {fmtSigned6(asset.priceChangePercent24h)}%
-                  </td>
-                  <td className="px-2 py-2 text-right font-mono-num text-[#f2dedc]">
-                    {fmt6(asset.lastPrice)}
-                  </td>
-                  <td className="px-2 py-2 text-right font-mono-num text-[#f2dedc]">
-                    {fmt6(asset.pullbackDepthPct)}%
-                  </td>
-                  <td className="px-2 py-2 text-right font-mono-num text-[10px] text-[#f2dedc]">
-                    <div>RSI {fmt6(asset.rsi15s)}</div>
-                    <div className="text-[#EBAEE6]">Δ {fmt6(asset.orderflowDeltaRatio)}x</div>
-                  </td>
-                  <td className="py-2 pl-2 pr-3 text-right">
-                    <StageBadge stage={asset.stage} side={side} />
-                  </td>
-                </tr>
+                <ScannerRow key={asset.symbol} asset={asset} side={side} />
               ))}
             </tbody>
           </table>

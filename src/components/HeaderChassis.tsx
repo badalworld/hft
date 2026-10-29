@@ -1,5 +1,6 @@
 import React from 'react';
 import {
+  Activity,
   BrainCircuit,
   LineChart,
   Power,
@@ -11,11 +12,20 @@ import {
 } from 'lucide-react';
 import type { DashboardSnapshot } from '../types/hft';
 import { fmt6 } from '../utils/format';
+import type { FeedStatus } from '../hooks/useHftRealtime';
 import { HftBrandLogo } from './HftBrandLogo';
+
+const FEED_PRESENTATION: Record<FeedStatus, { label: string; tone: string }> = {
+  live: { label: 'LIVE STREAM', tone: 'text-[#ADEBB3]' },
+  polling: { label: 'REST POLLING', tone: 'text-[#EBAEE6]' },
+  stalled: { label: 'STALL — RECOVERING', tone: 'text-[#FF857A]' },
+  offline: { label: 'NO FEED', tone: 'text-[#FF857A]' },
+};
 
 interface HeaderChassisProps {
   snapshot: DashboardSnapshot | null;
   wsConnected: boolean;
+  feedStatus: FeedStatus;
   actionBusy: boolean;
   errorCount: number;
   onToggleEngine: (next: boolean) => void;
@@ -28,6 +38,7 @@ interface HeaderChassisProps {
 export const HeaderChassis: React.FC<HeaderChassisProps> = ({
   snapshot,
   wsConnected,
+  feedStatus,
   actionBusy,
   errorCount,
   onToggleEngine,
@@ -42,6 +53,8 @@ export const HeaderChassis: React.FC<HeaderChassisProps> = ({
   const weightUsed = snapshot?.rateTelemetry.usedWeight1m ?? 0;
   const weightMax = snapshot?.rateTelemetry.maxWeight1m ?? 2400;
   const weightPct = snapshot?.rateTelemetry.utilizationPct ?? 0;
+  const style = snapshot?.styleParams;
+  const feed = FEED_PRESENTATION[feedStatus];
 
   return (
     <header className="skeuo-chassis skeuo-lotus-trim relative overflow-hidden rounded-2xl px-4 pt-4 pb-3.5 sm:px-6">
@@ -72,7 +85,7 @@ export const HeaderChassis: React.FC<HeaderChassisProps> = ({
             />
             <div>
               <div className="text-[10px] uppercase tracking-wider text-[#b99895]">
-                Binance FAPI
+                Binance PAPI
               </div>
               <div className="font-mono-num text-[11px] font-semibold text-[#fdf6f5]">
                 {apiConnected
@@ -104,6 +117,24 @@ export const HeaderChassis: React.FC<HeaderChassisProps> = ({
             </div>
           </div>
 
+          <div className="h-6 w-px bg-[#EBAEE6]/15" />
+
+          <div className="flex items-center gap-2" role="status" aria-live="polite">
+            <Activity
+              className={`h-3.5 w-3.5 ${
+                feedStatus === 'live' ? 'text-[#ADEBB3]' : 'text-[#FF857A]'
+              }`}
+            />
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-[#b99895]">
+                Dashboard Feed
+              </div>
+              <div className={`font-mono-num text-[11px] font-semibold ${feed.tone}`}>
+                {feed.label}
+              </div>
+            </div>
+          </div>
+
           <div className="hidden h-6 w-px bg-[#EBAEE6]/15 2xl:block" />
 
           <div className="hidden items-center gap-2 2xl:flex">
@@ -113,7 +144,8 @@ export const HeaderChassis: React.FC<HeaderChassisProps> = ({
                 Ladder & Target
               </div>
               <div className="font-mono-num text-[11px] font-semibold text-[#EBAEE6]">
-                $2.000000 • 10x→15x • +5.000000% Trail
+                ${fmt6(style?.baseMarginUsd ?? 0)} • {style?.minLeverage ?? 0}x→
+                {style?.maxLeverage ?? 0}x • +{fmt6(style?.trailingTriggerRoiPct ?? 0)}% Trail
               </div>
             </div>
           </div>

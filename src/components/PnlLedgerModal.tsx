@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { LineChart, TrendingDown, TrendingUp, X } from 'lucide-react';
 import type { DashboardSnapshot, PnlLedgerPoint } from '../types/hft';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 import { fmt6, fmtOutflowUsd6, fmtSigned6, fmtSignedUsd6, fmtUsd6 } from '../utils/format';
 
 interface PnlLedgerModalProps {
@@ -297,6 +298,8 @@ export const PnlLedgerModal: React.FC<PnlLedgerModalProps> = ({ open, snapshot, 
     []
   );
 
+  const { panelRef, titleId } = useDialogA11y(open, onClose, 'hft-pnl-ledger-title');
+
   if (!open) return null;
 
   const ledger = snapshot?.pnlLedger;
@@ -310,9 +313,14 @@ export const PnlLedgerModal: React.FC<PnlLedgerModalProps> = ({ open, snapshot, 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/80 p-3 backdrop-blur-md sm:p-6">
       <motion.div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         initial={{ opacity: 0, scale: 0.97, y: 12 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        className="skeuo-chassis skeuo-lotus-trim relative my-auto w-full max-w-5xl rounded-2xl p-5 sm:p-6"
+        className="skeuo-chassis skeuo-lotus-trim relative my-auto w-full max-w-5xl rounded-2xl p-5 sm:p-6 focus:outline-none"
       >
         <div className="lotus-ribbon absolute top-0 left-0 right-0 h-[3px]" />
         <div className="skeuo-screw !absolute top-3 left-2.5 hidden sm:block" />
@@ -324,7 +332,7 @@ export const PnlLedgerModal: React.FC<PnlLedgerModalProps> = ({ open, snapshot, 
               <LineChart className="h-5 w-5 text-[#D9A441]" />
             </div>
             <div>
-              <h2 className="font-crest text-lg font-bold tracking-wider text-lotus-crest">
+              <h2 id={titleId} className="font-crest text-lg font-bold tracking-wider text-lotus-crest">
                 PNL LEDGER — THE TRELLIS
               </h2>
               <p className="text-xs text-[#d5b8b5]">
@@ -332,7 +340,12 @@ export const PnlLedgerModal: React.FC<PnlLedgerModalProps> = ({ open, snapshot, 
               </p>
             </div>
           </div>
-          <button type="button" onClick={onClose} className="skeuo-btn rounded-xl p-2 text-[#fdf6f5]">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close the PNL ledger panel"
+            className="skeuo-btn rounded-xl p-2 text-[#fdf6f5]"
+          >
             <X className="h-4 w-4" />
           </button>
         </div>

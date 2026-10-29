@@ -2,7 +2,7 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import { Lock, TrendingUp, Wallet, ShieldAlert } from 'lucide-react';
 import type { DashboardSnapshot } from '../types/hft';
-import { fmt6, fmtSigned6, fmtSignedUsd6, fmtUsd6 } from '../utils/format';
+import { fmt6, fmtSigned6, fmtSignedUsd6, fmtUsd2, fmtUsd6 } from '../utils/format';
 import { SegmentDefs, SevenSegmentNumber, useConsoleGlyphHeight } from './SevenSegmentNumber';
 
 interface EquityBezelProps {
@@ -58,7 +58,7 @@ export const EquityBezel: React.FC<EquityBezelProps> = ({ snapshot }) => {
         <div className="skeuo-oled rounded-xl px-4 py-4">
           <div className="flex items-baseline justify-between gap-2">
             <SevenSegmentNumber
-              value={fmtUsd6(startBalance)}
+              value={fmtUsd2(startBalance)}
               tone="orchid"
               heightPx={glyphPx}
               label={`Start balance ${fmtUsd6(startBalance)} USDT`}
@@ -114,7 +114,7 @@ export const EquityBezel: React.FC<EquityBezelProps> = ({ snapshot }) => {
           <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-baseline">
             <div className="flex items-baseline gap-2.5">
               <SevenSegmentNumber
-                value={fmtUsd6(currentEquity)}
+                value={fmtUsd2(currentEquity)}
                 tone={startLocked && equityDelta < 0 ? 'coral' : 'mint'}
                 heightPx={glyphPx}
                 label={`Current equity ${fmtUsd6(currentEquity)} USDT, ${
@@ -122,7 +122,7 @@ export const EquityBezel: React.FC<EquityBezelProps> = ({ snapshot }) => {
                 } start balance`}
               />
               <span className="font-mono-num text-xs font-semibold text-[#ADEBB3]">
-                USDT LIVE
+                {fmtUsd6(currentEquity)} USDT LIVE
               </span>
             </div>
 

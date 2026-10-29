@@ -43,7 +43,7 @@ export function createDefaultStyleParams(): AdaptiveStyleParams {
     trailingTriggerRoiPct: 5.0,
     trailingFloorRoiPct: 3.65,
     trailingCallbackRoiPct: 1.15,
-    protectiveStopRoiPct: -9.5,
+    protectiveStopRoiPct: -6.0,
     pullbackRsiLongMax: 52.0,
     pullbackRsiShortMin: 48.0,
     minOrderflowDeltaRatio: 1.18,
@@ -51,6 +51,7 @@ export function createDefaultStyleParams(): AdaptiveStyleParams {
     max24hOverextensionPct: 85.0,
     cooldownSecondsAfterLoss: 120,
     minAiConfidenceScore: 0.56,
+    minFeeHurdleMultiple: 2.0,
   };
 }
 
@@ -148,6 +149,8 @@ const PostMortemStateAnnotation = Annotation.Root({
   durationSec: Annotation<number>,
   exitReason: Annotation<string>,
   features: Annotation<EntryFeatureVector>,
+  /** Guard ROI that was live at entry — the level the exit is judged against. */
+  entryGuardRoiPct: Annotation<number>,
   lessonKey: Annotation<string>,
   verdict: Annotation<AiPostMortemAnalysis['verdict']>,
   autopsy: Annotation<LossAutopsy | null>,
@@ -489,6 +492,7 @@ export class AiAgentClubOrchestrator {
               exitReason: state.exitReason,
               features: state.features,
               params: this.styleParams,
+              entryGuardRoiPct: state.entryGuardRoiPct,
             });
 
         if (autopsy) {
@@ -580,7 +584,7 @@ export class AiAgentClubOrchestrator {
                 5,
                 15,
                 `Stop filled ${f6(
-                  state.finalRoiPct - p.protectiveStopRoiPct
+                  state.finalRoiPct - (state.entryGuardRoiPct ?? p.protectiveStopRoiPct)
                 )}% ROI through the guard — position too large for available exit depth`
               );
               propose(
@@ -631,6 +635,15 @@ export class AiAgentClubOrchestrator {
                 `Peak +${f6(state.peakRoiPct)}% ROI sat under the ${f6(
                   hurdle
                 )}% fee hurdle — this band cannot pay for itself at this leverage`
+              );
+              propose(
+                'minFeeHurdleMultiple',
+                p.minFeeHurdleMultiple + 0.25,
+                1.0,
+                4.0,
+                `Peak +${f6(
+                  state.peakRoiPct
+                )}% ROI bought a structure with no room for its own exit — demand more than one round trip next time`
               );
               propose(
                 'minAiConfidenceScore',
@@ -732,6 +745,7 @@ export class AiAgentClubOrchestrator {
           patterns: this.getLessonPatterns(),
           lessonKey: state.lessonKey,
           recentLessons: this.lessons,
+          rootCause: state.autopsy?.rootCause,
         };
         const ballots = castBallots(state.proposals, ctx);
 
@@ -871,6 +885,7 @@ export class AiAgentClubOrchestrator {
     durationSec: number;
     exitReason: string;
     features: EntryFeatureVector;
+    entryGuardRoiPct: number;
   }): Promise<{
     analysis: AiPostMortemAnalysis;
     mutationRecord: StyleMutationRecord | null;
@@ -903,6 +918,7 @@ export class AiAgentClubOrchestrator {
       patterns: this.getLessonPatterns(),
       lessonKey: out.lessonKey || lessonKey(params.side, params.features),
       recentLessons: this.lessons,
+      rootCause: out.autopsy?.rootCause,
     };
 
     const analysis: AiPostMortemAnalysis = {

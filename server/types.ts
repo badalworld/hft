@@ -5,7 +5,17 @@ export interface LogEntry {
   timestamp: number;
   isoTime: string;
   level: LogLevel;
-  module: 'ENGINE' | 'BINANCE_API' | 'SCANNER' | 'CANDLE_15S' | 'MONITOR_1S' | 'EXECUTION' | 'AI_CLUB' | 'NETWORK';
+  module:
+    | 'ENGINE'
+    | 'BINANCE_API'
+    | 'SCANNER'
+    | 'CANDLE_15S'
+    | 'MONITOR_1S'
+    | 'EXECUTION'
+    | 'EXCHANGE_STOP'
+    | 'AI_CLUB'
+    | 'STATE'
+    | 'NETWORK';
   message: string;
   meta?: Record<string, unknown>;
 }
@@ -107,6 +117,12 @@ export interface OpenTradePosition {
   worstRoiPct: number;
   trailingStopRoiPct: number | null;
   protectiveStopRoiPct: number;
+  /**
+   * The guard that was live the moment this position filled. The live parameter can
+   * tighten afterwards, and a loss autopsy must judge the exit against the promise the
+   * entry actually made, not against whatever the council decided five minutes later.
+   */
+  entryProtectiveStopRoiPct?: number;
   lastCheckedAt: number;
   entryFeatures?: EntryFeatureVector;
 }
@@ -270,6 +286,7 @@ export interface AdaptiveStyleParams {
   max24hOverextensionPct: number;     // Filter extreme blow-off tops/bottoms if whipsawing
   cooldownSecondsAfterLoss: number;   // Per-symbol cooldown after loss
   minAiConfidenceScore: number;       // System-1 probability gate (0..1)
+  minFeeHurdleMultiple: number;       // Expected 15s excursion must be this many round trips of taker fees
 }
 
 export type LocalDecisionProvider = 'builtin' | 'ollama_nimble' | 'laya_http' | 'kev_http';
@@ -493,6 +510,8 @@ export interface DashboardSnapshot {
   realizedNetPnlTotal: number;
 
   // Settled-Trade Ledger & Analytics
+  /** Bumped with every settled trade, lesson or income entry. See `lightenSnapshot`. */
+  ledgerVersion: number;
   pnlLedger: PnlLedger;
   lessons: TradeLesson[];
   lessonPatterns: LessonPattern[];

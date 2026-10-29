@@ -36,6 +36,7 @@ export interface Ballot {
 const PARAM_OWNER: Record<string, string> = {
   max24hOverextensionPct: 'alpha-scout',
   cooldownSecondsAfterLoss: 'alpha-scout',
+  minFeeHurdleMultiple: 'alpha-scout',
   minOrderflowDeltaRatio: 'microstructure-sniper',
   minConfirmationBodyRatio: 'microstructure-sniper',
   pullbackRsiLongMax: 'microstructure-sniper',
@@ -61,22 +62,26 @@ const AGENT_NAMES: Record<string, string> = {
 
 /**
  * For every parameter, does a HIGHER value mean a STRICTER trading stance?
- * `pullbackRsiLongMax` is inverted on purpose: a lower ceiling forces the bot to
- * wait for a deeper reset, so tightening = decreasing.
+ * Two of these are easy to get backwards and both matter for real money:
+ * `pullbackRsiLongMax` is inverted because a lower ceiling forces the bot to wait for a
+ * deeper reset; `protectiveStopRoiPct` is inverted because it lives on a negative scale,
+ * so -6.0 is tighter than -9.5 even though the number went up. `baseMarginUsd` and the
+ * leverage caps are inverted too: a bigger bet is a looser stance, never a stricter one.
  */
 const HIGHER_IS_TIGHTER: Record<string, boolean> = {
   max24hOverextensionPct: false,
   cooldownSecondsAfterLoss: true,
+  minFeeHurdleMultiple: true,
   minOrderflowDeltaRatio: true,
   minConfirmationBodyRatio: true,
   pullbackRsiLongMax: false,
   pullbackRsiShortMin: true,
   minAiConfidenceScore: true,
-  baseMarginUsd: true,
+  baseMarginUsd: false,
   minLeverage: false,
   maxLeverage: false,
   capitalUtilizationCapPct: false,
-  protectiveStopRoiPct: false,
+  protectiveStopRoiPct: true,
   trailingTriggerRoiPct: false,
   trailingFloorRoiPct: true,
   trailingCallbackRoiPct: false,
@@ -91,9 +96,18 @@ const MAX_STEP: Record<string, number> = {
   minAiConfidenceScore: 0.02,
   trailingCallbackRoiPct: 0.15,
   trailingFloorRoiPct: 0.2,
+  trailingTriggerRoiPct: 0.5,
   max24hOverextensionPct: 5.0,
   cooldownSecondsAfterLoss: 45,
+  minFeeHurdleMultiple: 0.25,
   protectiveStopRoiPct: 1.5,
+  // Sizing levers move dollars, so they get the smallest steps in the book: one leverage
+  // rung or fifty cents at a time. Without a cap here the owner seat could not object to a
+  // proposal that doubled the position on a single post-mortem.
+  baseMarginUsd: 0.5,
+  minLeverage: 2,
+  maxLeverage: 2,
+  capitalUtilizationCapPct: 5.0,
 };
 
 /** Which parameters this verdict is actually allowed to argue for. */
@@ -116,6 +130,52 @@ const VERDICT_PARAMS: Record<string, string[]> = {
   ],
 };
 
+/**
+ * Loss proposals are drafted from the autopsy's root cause, not from the verdict label, so
+ * the coherence seat has to be checked against the same attribution. Without this map, a
+ * leverage cut recommended by an EXIT_SLIPPAGE autopsy could never be approved: the verdict
+ * is LOSS_MOMENTUM_REVERSAL, which pre-dates the autopsy and does not mention maxLeverage.
+ */
+const AUTOPSY_PARAMS: Record<string, string[]> = {
+  EXIT_SLIPPAGE: ['maxLeverage', 'baseMarginUsd', 'cooldownSecondsAfterLoss', 'protectiveStopRoiPct'],
+  TRAIL_TOO_LOOSE: ['trailingCallbackRoiPct', 'trailingFloorRoiPct', 'trailingTriggerRoiPct'],
+  FEE_DRAG: ['maxLeverage', 'minAiConfidenceScore', 'trailingFloorRoiPct'],
+  MOVE_TOO_SMALL_FOR_FEES: [
+    'maxLeverage',
+    'minFeeHurdleMultiple',
+    'minAiConfidenceScore',
+    'trailingFloorRoiPct',
+  ],
+  ENTRY_INTO_SPENT_MOVE: ['max24hOverextensionPct', 'cooldownSecondsAfterLoss'],
+  ADVERSE_TAKER_FLOW: [
+    'minConfirmationBodyRatio',
+    'pullbackRsiLongMax',
+    'pullbackRsiShortMin',
+  ],
+  ENTRY_TOO_EARLY: [
+    'minOrderflowDeltaRatio',
+    'minConfirmationBodyRatio',
+    'pullbackRsiLongMax',
+    'pullbackRsiShortMin',
+    'minAiConfidenceScore',
+  ],
+  REGIME_FADED: [
+    'max24hOverextensionPct',
+    'minConfirmationBodyRatio',
+    'cooldownSecondsAfterLoss',
+    'minAiConfidenceScore',
+  ],
+};
+
+/** Parameters whose *increase* puts more capital at risk on a single trade. */
+const RISK_UP_PARAMS = [
+  'maxLeverage',
+  'minLeverage',
+  'baseMarginUsd',
+  'capitalUtilizationCapPct',
+];
+
+
 export interface CouncilContext {
   params: AdaptiveStyleParams;
   verdict: AiPostMortemAnalysis['verdict'];
@@ -123,6 +183,8 @@ export interface CouncilContext {
   patterns: LessonPattern[];
   lessonKey: string;
   recentLessons: TradeLesson[];
+  /** Set when the loss was attributed to a mechanism; the drafter keys off this, not the verdict. */
+  rootCause?: string;
 }
 
 function isTightening(param: string, before: number, after: number): boolean {
@@ -188,10 +250,15 @@ function voteBy(agentId: string, prop: MutationProposal, ctx: CouncilContext): V
       )} is inside my ${f6(cap)} limit and matches the tape.`;
     }
   } else if (agentId === 'hermes-evolver') {
-    const allowed = VERDICT_PARAMS[ctx.verdict] || [];
+    const allowed =
+      (ctx.rootCause ? AUTOPSY_PARAMS[ctx.rootCause] : undefined) ||
+      VERDICT_PARAMS[ctx.verdict] ||
+      [];
     if (!allowed.includes(prop.param)) {
       vote = 'AGAINST';
-      why = `Verdict ${ctx.verdict} does not justify touching ${prop.param}; that is an unrelated change.`;
+      why = `${
+        ctx.rootCause ? `Autopsy ${ctx.rootCause}` : `Verdict ${ctx.verdict}`
+      } does not justify touching ${prop.param}; that is an unrelated change.`;
     } else {
       const flips = flipFlopCount(prop.param, ctx);
       if (flips >= 3) {
@@ -203,11 +270,12 @@ function voteBy(agentId: string, prop: MutationProposal, ctx: CouncilContext): V
       }
     }
   } else {
-    // Third seat: capital / risk consequence of the change
+    // Third seat: capital / risk consequence of the change. Direction matters — cutting
+    // leverage after a slippage autopsy is the *repair*, and a seat that vetoed every
+    // mention of maxLeverage could never approve it, which is why the riskiest lever in
+    // the book was frozen in place.
     const riskUp =
-      prop.param === 'maxLeverage' ||
-      prop.param === 'baseMarginUsd' ||
-      prop.param === 'capitalUtilizationCapPct' ||
+      (RISK_UP_PARAMS.includes(prop.param) && after > before) ||
       (prop.param === 'protectiveStopRoiPct' && after < before);
     if (riskUp) {
       vote = 'AGAINST';
@@ -230,7 +298,9 @@ function voteBy(agentId: string, prop: MutationProposal, ctx: CouncilContext): V
 /**
  * Every proposal gets exactly three seats: the parameter's owner (who knows its
  * bounds), Hermes (verdict coherence + oscillation guard) and one peer that judges
- * only the capital consequence. Two FORs are required before anything is applied.
+ * only the capital consequence. Two FORs are required before anything is applied, and
+ * the owner holds a hard veto: a 2/3 vote must not be able to outargue the one agent
+ * accountable for a parameter's stated bounds on a live account.
  */
 export function castBallots(
   proposals: MutationProposal[],
@@ -251,7 +321,7 @@ export function castBallots(
       reason: prop.reason,
       votes,
       forCount,
-      approved: forCount >= 2,
+      approved: forCount >= 2 && votes.some((v) => v.agent === owner && v.vote === 'FOR'),
     };
   });
 }

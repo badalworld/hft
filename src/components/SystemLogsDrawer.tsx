@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Download, ScrollText, Search, Trash2, X } from 'lucide-react';
 import type { LogEntry, LogLevel } from '../types/hft';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 import { LotusSelect } from './LotusSelect';
 
 interface SystemLogsDrawerProps {
@@ -46,14 +47,21 @@ export const SystemLogsDrawer: React.FC<SystemLogsDrawerProps> = ({
     });
   }, [logs, levelFilter, moduleFilter, query]);
 
+  const { panelRef, titleId } = useDialogA11y(open, onClose, 'hft-logs-title');
+
   if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 backdrop-blur-md sm:p-6">
       <motion.div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         initial={{ opacity: 0, scale: 0.96, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        className="skeuo-chassis skeuo-lotus-trim relative flex max-h-[92vh] w-full max-w-5xl flex-col rounded-2xl p-5 sm:p-6"
+        className="skeuo-chassis skeuo-lotus-trim relative flex max-h-[92vh] w-full max-w-5xl flex-col rounded-2xl p-5 sm:p-6 focus:outline-none"
       >
         <div className="lotus-ribbon absolute top-0 left-0 right-0 h-[3px]" />
 
@@ -64,11 +72,11 @@ export const SystemLogsDrawer: React.FC<SystemLogsDrawerProps> = ({
               <ScrollText className="h-5 w-5 text-[#ADEBB3]" />
             </div>
             <div>
-              <h2 className="font-crest text-lg font-bold tracking-wider text-lotus-crest">
+              <h2 id={titleId} className="font-crest text-lg font-bold tracking-wider text-lotus-crest">
                 HFT SYSTEM, EXECUTION & ERROR DIAGNOSTIC LOGS
               </h2>
               <p className="text-xs text-[#d5b8b5]">
-                Full real-time trace of Binance FAPI calls, 10x→15x leverage escalations, 15s signals, 1s checks & error diagnostics
+                Full real-time trace of Binance Portfolio Margin (PAPI) calls, 10x→15x leverage escalations, 15s signals, 1s checks & error diagnostics
               </p>
             </div>
           </div>
@@ -94,6 +102,7 @@ export const SystemLogsDrawer: React.FC<SystemLogsDrawerProps> = ({
             <button
               type="button"
               onClick={onClose}
+              aria-label="Close the diagnostic logs panel"
               className="skeuo-btn rounded-xl p-2 text-[#fdf6f5]"
             >
               <X className="h-4 w-4" />
@@ -109,6 +118,7 @@ export const SystemLogsDrawer: React.FC<SystemLogsDrawerProps> = ({
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search log entries"
               placeholder="Search symbol, order ID, error code (-2015, -4164, -1021)..."
               className="skeuo-input w-full rounded-xl py-2 pl-9 pr-3 text-xs"
             />
@@ -140,6 +150,8 @@ export const SystemLogsDrawer: React.FC<SystemLogsDrawerProps> = ({
               { value: 'EXECUTION', label: 'EXECUTION' },
               { value: 'BINANCE_API', label: 'BINANCE_API' },
               { value: 'MONITOR_1S', label: 'MONITOR_1S' },
+              { value: 'EXCHANGE_STOP', label: 'EXCHANGE_STOP' },
+              { value: 'STATE', label: 'STATE' },
               { value: 'CANDLE_15S', label: 'CANDLE_15S' },
               { value: 'SCANNER', label: 'SCANNER' },
               { value: 'AI_CLUB', label: 'AI_CLUB' },
@@ -150,7 +162,7 @@ export const SystemLogsDrawer: React.FC<SystemLogsDrawerProps> = ({
         </div>
 
         {/* Log Console */}
-        <div className="skeuo-oled flex-1 overflow-y-auto rounded-xl p-3 font-mono-num text-xs">
+        <div role="region" aria-label="Diagnostic log console" className="skeuo-oled flex-1 overflow-y-auto rounded-xl p-3 font-mono-num text-xs">
           {filtered.length === 0 ? (
             <div className="py-12 text-center text-[#b99895]">
               No log entries match your current filter.

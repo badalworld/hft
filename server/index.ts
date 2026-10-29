@@ -8,6 +8,8 @@ import { HftBotEngine } from './engine/hftBotEngine.js';
 import { DIRECTIVE_KINDS } from './ai/operatorDirectives.js';
 import type { OperatorDirectiveKind } from './types.js';
 import { logger } from './utils/logger.js';
+import { isValidIpv4 } from './utils/ipDiscovery.js';
+import { lightenSnapshot } from './utils/streamFrame.js';
 
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -73,23 +75,35 @@ async function startServer() {
   });
 
   app.post('/api/settings/bind-ip', async (req, res) => {
-    const localAddress = req.body?.localAddress ? String(req.body.localAddress) : null;
-    const ipReport = await engine.setBoundLocalAddress(localAddress);
+    const raw = req.body?.localAddress ? String(req.body.localAddress).trim() : null;
+    if (raw !== null && !isValidIpv4(raw)) {
+      res.status(400).json({ ok: false, message: `"${raw}" is not an IPv4 address. Choose a discovered interface or clear the binding.` });
+      return;
+    }
+    const ipReport = await engine.setBoundLocalAddress(raw);
     res.json({ ipReport });
   });
 
   app.post('/api/settings/local-ai', (req, res) => {
-    engine.updateLocalDecisionConfig({
+    const out = engine.updateLocalDecisionConfig({
       provider: req.body?.provider,
       endpointUrl: req.body?.endpointUrl,
       modelName: req.body?.modelName,
     });
-    res.json({ snapshot: engine.getSnapshot() });
+    if (out.rejected.length > 0) {
+      res.status(400).json({ ok: false, rejected: out.rejected, snapshot: engine.getSnapshot() });
+      return;
+    }
+    res.json({ ok: true, snapshot: engine.getSnapshot() });
   });
 
   app.post('/api/settings/style-params', (req, res) => {
-    engine.updateStyleParams(req.body || {});
-    res.json({ snapshot: engine.getSnapshot() });
+    const out = engine.updateStyleParams(req.body || {});
+    if (out.accepted.length === 0 && out.rejected.length > 0) {
+      res.status(400).json({ ok: false, rejected: out.rejected, snapshot: engine.getSnapshot() });
+      return;
+    }
+    res.json({ ok: true, accepted: out.accepted, rejected: out.rejected, snapshot: engine.getSnapshot() });
   });
 
   const NUMERIC_DIRECTIVES = new Set<OperatorDirectiveKind>([
@@ -194,7 +208,17 @@ async function startServer() {
 
   // --- REAL-TIME WEBSOCKET SERVER (/ws) ---
   const wss = new WebSocketServer({ noServer: true });
-  const wsClients = new Set<WebSocket>();
+
+  interface StreamClient {
+    ws: WebSocket;
+    /** The ledger version this client already holds, so heavy blocks travel once per change. */
+    ledgerVersion: number;
+    alive: boolean;
+    behindFrames: number;
+  }
+
+  const wsClients = new Set<StreamClient>();
+  const MAX_BUFFERED_BYTES = 1_000_000;
 
   httpServer.on('upgrade', (request, socket, head) => {
     const pathname = request.url?.split('?')[0] || '';
@@ -206,13 +230,42 @@ async function startServer() {
     // Leave other upgrade paths (such as Vite HMR in dev) untouched!
   });
 
+  function sendFrame(client: StreamClient, payload: string): void {
+    if (client.ws.readyState !== WebSocket.OPEN) return;
+    // A backgrounded or throttled tab stops draining its send queue. Skipping its frames keeps
+    // memory off the trading process, and a client that never catches up is dropped so it can
+    // reconnect with a clean snapshot instead of streaming into a black hole.
+    if (client.ws.bufferedAmount > MAX_BUFFERED_BYTES) {
+      client.behindFrames += 1;
+      if (client.behindFrames > 30) {
+        logger.warn(
+          'NETWORK',
+          'Dashboard client could not keep up with the live stream and was disconnected; it reconnects with a fresh snapshot.'
+        );
+        client.ws.terminate();
+        wsClients.delete(client);
+      }
+      return;
+    }
+    client.behindFrames = 0;
+    try {
+      client.ws.send(payload);
+    } catch {
+      // ignore
+    }
+  }
+
   wss.on('connection', (ws) => {
-    wsClients.add(ws);
+    const client: StreamClient = { ws, ledgerVersion: -1, alive: true, behindFrames: 0 };
+    wsClients.add(client);
+
+    const full = engine.getSnapshot();
+    client.ledgerVersion = full.ledgerVersion;
     try {
       ws.send(
         JSON.stringify({
           type: 'INIT',
-          snapshot: engine.getSnapshot(),
+          snapshot: full,
           logs: logger.getLogs(250),
         })
       );
@@ -220,25 +273,48 @@ async function startServer() {
       // ignore
     }
 
+    ws.on('pong', () => {
+      client.alive = true;
+    });
+
+    // The browser cannot see WebSocket protocol pings, so the dashboard's own application
+    // heartbeat is what proves the duplex path still carries data.
+    ws.on('message', (data) => {
+      client.alive = true;
+      let msg: { type?: string };
+      try {
+        msg = JSON.parse(String(data));
+      } catch {
+        return;
+      }
+      if (msg.type === 'PING') {
+        sendFrame(client, JSON.stringify({ type: 'PONG', serverTime: Date.now() }));
+      }
+    });
+
     ws.on('close', () => {
-      wsClients.delete(ws);
+      wsClients.delete(client);
     });
     ws.on('error', () => {
-      wsClients.delete(ws);
+      wsClients.delete(client);
     });
   });
 
   engine.onSnapshot((snapshot) => {
     if (wsClients.size === 0) return;
-    const msg = JSON.stringify({ type: 'SNAPSHOT', snapshot });
+    let lightStr: string | null = null;
+    let fullStr: string | null = null;
     for (const client of wsClients) {
-      if (client.readyState === WebSocket.OPEN) {
-        try {
-          client.send(msg);
-        } catch {
-          // ignore
-        }
+      if (client.ledgerVersion !== snapshot.ledgerVersion) {
+        fullStr ??= JSON.stringify({ type: 'SNAPSHOT', snapshot });
+        client.ledgerVersion = snapshot.ledgerVersion;
+        sendFrame(client, fullStr);
+        continue;
       }
+      if (lightStr === null) {
+        lightStr = JSON.stringify({ type: 'SNAPSHOT', snapshot: lightenSnapshot(snapshot) });
+      }
+      sendFrame(client, lightStr);
     }
   });
 
@@ -246,15 +322,30 @@ async function startServer() {
     if (wsClients.size === 0) return;
     const msg = JSON.stringify({ type: 'LOG', entry });
     for (const client of wsClients) {
-      if (client.readyState === WebSocket.OPEN) {
-        try {
-          client.send(msg);
-        } catch {
-          // ignore
-        }
-      }
+      sendFrame(client, msg);
     }
   });
+
+  // Half-open TCP after a Wi-Fi blip or a laptop sleep never fires "close" on its own, which
+  // is what makes a dashboard look frozen while still reporting itself connected. An
+  // unanswered ping means the peer is gone; terminate rather than keep a dead socket.
+  const heartbeat = setInterval(() => {
+    for (const client of wsClients) {
+      if (!client.alive) {
+        logger.warn('NETWORK', 'Dashboard client stopped answering pings; dropping the dead socket.');
+        client.ws.terminate();
+        wsClients.delete(client);
+        continue;
+      }
+      client.alive = false;
+      try {
+        client.ws.ping();
+      } catch {
+        // ignore
+      }
+    }
+  }, 10_000);
+  heartbeat.unref?.();
 
   // --- FRONTEND SERVING (Vite Middleware in Dev, Compiled dist/ in Prod) ---
   const distPath = path.resolve(process.cwd(), 'dist');

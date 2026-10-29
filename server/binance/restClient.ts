@@ -688,6 +688,7 @@ export class BinanceFuturesRestClient {
     quantity: string;
     isCloseOrder: boolean;
     hedgeMode: boolean;
+    newClientOrderId?: string;
   }): Promise<RawOrderResult> {
     const orderParams: Record<string, string | boolean | undefined> = {
       symbol: params.symbol,
@@ -696,6 +697,7 @@ export class BinanceFuturesRestClient {
       type: 'MARKET',
       quantity: params.quantity,
       newOrderRespType: 'RESULT',
+      newClientOrderId: params.newClientOrderId,
     };
 
     // CRITICAL BINANCE FUTURES RULE:
@@ -712,6 +714,81 @@ export class BinanceFuturesRestClient {
       params: orderParams,
       signed: true,
       priority: params.isCloseOrder ? 'P0_CRITICAL_EXIT' : 'P1_EXECUTION_POSITION',
+      weight: 1,
+    });
+  }
+
+  /**
+   * A STOP_MARKET that closes the whole position on the exchange side. The software
+   * 1 Hz monitor stays as a backstop, but this is the order that actually protects the
+   * account when the process is between ticks, restarting, or blocked on disk I/O.
+   *
+   * closePosition=true is used instead of a quantity so the trigger always matches the
+   * live position size, and workingType=MARK_PRICE matches the same price the software
+   * guard watches (last-price triggers fire on thin-book wicks the mark never prints).
+   */
+  public async placeStopMarketClosePosition(params: {
+    symbol: string;
+    closeSide: 'BUY' | 'SELL';
+    positionSide: 'BOTH' | 'LONG' | 'SHORT';
+    stopPrice: string;
+    hedgeMode: boolean;
+  }): Promise<RawOrderResult> {
+    const orderParams: Record<string, string | boolean | undefined> = {
+      symbol: params.symbol,
+      side: params.closeSide,
+      type: 'STOP_MARKET',
+      stopPrice: params.stopPrice,
+      closePosition: 'true',
+      workingType: 'MARK_PRICE',
+      priceProtect: 'TRUE',
+      timeInForce: 'GTC',
+      newOrderRespType: 'RESULT',
+    };
+
+    // Hedge Mode needs positionSide to know which leg to close; One-Way Mode rejects it
+    // paired with closePosition on some endpoints, so it is only sent when required.
+    if (params.hedgeMode) {
+      orderParams.positionSide = params.positionSide;
+    }
+
+    return this.rawRequest<RawOrderResult>({
+      method: 'POST',
+      path: '/papi/v1/um/order',
+      api: 'PAPI',
+      params: orderParams,
+      signed: true,
+      priority: 'P0_CRITICAL_EXIT',
+      weight: 1,
+    });
+  }
+
+  /** Withdraw one specific working order so the account never loses protection. */
+  public async cancelOpenOrder(symbol: string, orderId: number): Promise<void> {
+    await this.rawRequest<{ symbol: string; orderId: number; status: string }>({
+      method: 'DELETE',
+      path: '/papi/v1/um/order',
+      api: 'PAPI',
+      params: { symbol, orderId },
+      signed: true,
+      priority: 'P1_EXECUTION_POSITION',
+      weight: 1,
+    });
+  }
+
+  /**
+   * Ask Binance what became of a specific client order id. This is the only safe way to
+   * resolve a POST that timed out: re-sending an order whose first attempt may already
+   * have filled doubles the position.
+   */
+  public async queryOrderByClientId(symbol: string, newClientOrderId: string): Promise<RawOrderResult> {
+    return this.rawRequest<RawOrderResult>({
+      method: 'GET',
+      path: '/papi/v1/um/order',
+      api: 'PAPI',
+      params: { symbol, origClientOrderId: newClientOrderId },
+      signed: true,
+      priority: 'P0_CRITICAL_EXIT',
       weight: 1,
     });
   }

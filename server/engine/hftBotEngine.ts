@@ -1,10 +1,10 @@
 import crypto from 'node:crypto';
 import type {
-  AdaptiveStyleParams,
   ClosedTradeRecord,
   DashboardSnapshot,
   EntryFeatureVector,
   LocalDecisionConfig,
+  LocalDecisionProvider,
   OpenTradePosition,
   OperatorDirective,
   OperatorNote,
@@ -12,7 +12,7 @@ import type {
   ServerIpReport,
 } from '../types.js';
 import { BinanceRateGovernor } from '../binance/rateGovernor.js';
-import { BinanceFuturesRestClient } from '../binance/restClient.js';
+import { BinanceFuturesRestClient, type RawOrderResult } from '../binance/restClient.js';
 import { CandleBuilder15s } from '../binance/candleBuilder15s.js';
 import { BinanceWsStreamManager } from '../binance/wsStreamManager.js';
 import { AiAgentClubOrchestrator } from '../ai/agentClubGraph.js';
@@ -23,10 +23,23 @@ import { IncomeLedger } from './incomeLedger.js';
 import { buildPnlLedger } from './pnlLedger.js';
 import { aggregateLessonPatterns } from '../ai/lessonMemory.js';
 import { describeDirective, findVetoingDirective } from '../ai/operatorDirectives.js';
-import { PositionMonitor1s } from './positionMonitor1s.js';
+import { PositionMonitor1s, type StopLevelChange } from './positionMonitor1s.js';
 import { evaluate15sPullbackStrategy } from './strategy15s.js';
 import { f6, formatOrderQty, maskApiKey } from '../utils/format.js';
-import { scanServerIpv4Addresses } from '../utils/ipDiscovery.js';
+import { clearsFeeHurdle } from '../utils/feeHurdle.js';
+import { sanitizeStyleParams } from '../utils/styleGuard.js';
+import {
+  checkDecisionEndpoint,
+  LOCAL_DECISION_PROVIDERS,
+  providerNeedsEndpoint,
+} from '../utils/netGuard.js';
+import { decideStop, priceForRoi, roundStopPrice } from '../utils/stops.js';
+import {
+  isAmbiguousOrderFailure,
+  isUnfilledOrderStatus,
+  makeEntryClientOrderId,
+} from '../utils/orderSafety.js';
+import { isValidIpv4, scanServerIpv4Addresses } from '../utils/ipDiscovery.js';
 import { logger } from '../utils/logger.js';
 
 export class HftBotEngine {
@@ -69,8 +82,16 @@ export class HftBotEngine {
   private cooldownUntilMap = new Map<string, number>();
   private openingInFlight = new Set<string>();
   private closingInFlight = new Set<string>();
+  /** posKey -> working exchange stop orderId, so exactly one stop protects a position. */
+  private exchangeStopOrderIds = new Map<string, number>();
+  /** Positions whose stop was deliberately skipped, so the skip is logged once, not per second. */
+  private exchangeStopSkips = new Set<string>();
+  private pendingStopCancels: { symbol: string; orderId: number; attempts: number }[] = [];
+  private exchangeStopFailures = 0;
+  private exchangeStopsDisabled = false;
   private lastMarginPausedState = false;
   private tickCounter = 0;
+  private pendingBroadcast: NodeJS.Timeout | null = null;
   private mainLoopTimer: NodeJS.Timeout | null = null;
   private snapshotSubscribers = new Set<(snap: DashboardSnapshot) => void>();
 
@@ -90,7 +111,13 @@ export class HftBotEngine {
     this.engineRunning = this.stateStore.getEngineRunning();
 
     const boundIp = this.stateStore.getBoundLocalAddress();
-    if (boundIp) {
+    if (boundIp && !isValidIpv4(boundIp)) {
+      this.stateStore.setBoundLocalAddress(null);
+      logger.warn(
+        'STATE',
+        `Discarded bound local address "${boundIp}" from the vault — it is not an IPv4 address, and every signed request would fail to leave the machine.`
+      );
+    } else if (boundIp) {
       this.restClient.setBoundLocalAddress(boundIp);
       this.wsManager.setBoundLocalAddress(boundIp);
     }
@@ -106,10 +133,11 @@ export class HftBotEngine {
     });
 
     this.wsManager.onMarkPriceTick((markMap) => {
-      const exits = this.positionMonitor.tickRealtimePrices(
+      const { exits, stopLevelChanges } = this.positionMonitor.tickRealtimePrices(
         (sym) => markMap.get(sym),
         this.aiClub.getStyleParams()
       );
+      this.handleStopLevelChanges(stopLevelChanges);
       for (const ex of exits) {
         this.closePositionNow(ex.position, ex.reason).catch(() => {});
       }
@@ -329,8 +357,35 @@ export class HftBotEngine {
     return { startBalance: info.startBalance, locked: info.startBalanceLocked };
   }
 
-  public updateLocalDecisionConfig(cfg: Partial<LocalDecisionConfig>) {
-    this.aiClub.setLocalDecisionConfig(cfg);
+  public updateLocalDecisionConfig(cfg: Partial<LocalDecisionConfig>): { rejected: string[] } {
+    const current = this.aiClub.getLocalDecisionConfig();
+    const provider = (cfg.provider ?? current.provider) as LocalDecisionProvider;
+    const rawEndpoint =
+      cfg.endpointUrl !== undefined ? String(cfg.endpointUrl).trim() : current.endpointUrl;
+    const rejected: string[] = [];
+    let endpointUrl = rawEndpoint;
+
+    if (!LOCAL_DECISION_PROVIDERS.includes(provider)) {
+      rejected.push(`"${String(cfg.provider)}" is not a supported decision provider`);
+    }
+    if (providerNeedsEndpoint(provider)) {
+      const check = checkDecisionEndpoint(rawEndpoint);
+      if (!check.ok) rejected.push(check.reason);
+      else endpointUrl = check.normalizedUrl;
+    }
+
+    if (rejected.length > 0) {
+      logger.warn(
+        'AI_CLUB',
+        `Rejected System-1 runtime change — nothing was stored: ${rejected.join('; ')}`,
+        { provider: String(cfg.provider), endpointUrl: rawEndpoint }
+      );
+      return { rejected };
+    }
+
+    const modelName =
+      typeof cfg.modelName === 'string' ? cfg.modelName.trim().slice(0, 96) : current.modelName;
+    this.aiClub.setLocalDecisionConfig({ provider, endpointUrl, modelName });
     this.stateStore.setLocalDecisionConfig(this.aiClub.getLocalDecisionConfig());
     logger.ai(
       'AI_CLUB',
@@ -339,13 +394,24 @@ export class HftBotEngine {
       }).`
     );
     this.broadcastSnapshot();
+    return { rejected: [] };
   }
 
-  public updateStyleParams(partial: Partial<AdaptiveStyleParams>) {
-    this.aiClub.updateStyleParams(partial);
-    this.stateStore.setStyleParams(this.aiClub.getStyleParams());
-    logger.ai('AI_CLUB', 'Updated HFT style parameters.', partial as Record<string, unknown>);
+  public updateStyleParams(input: unknown): { accepted: string[]; rejected: string[] } {
+    const { accepted, rejected } = sanitizeStyleParams(this.aiClub.getStyleParams(), input);
+    const keys = Object.keys(accepted);
+    if (keys.length > 0) {
+      this.aiClub.updateStyleParams(accepted);
+      this.stateStore.setStyleParams(this.aiClub.getStyleParams());
+      logger.ai('AI_CLUB', 'Updated HFT style parameters.', accepted as Record<string, unknown>);
+    }
+    if (rejected.length > 0) {
+      logger.warn('AI_CLUB', `Refused unsafe style parameters: ${rejected.join('; ')}`, {
+        accepted: keys,
+      });
+    }
     this.broadcastSnapshot();
+    return { accepted: keys, rejected };
   }
 
   public getOperatorDirectives(): OperatorDirective[] {
@@ -432,10 +498,12 @@ export class HftBotEngine {
     }
 
     // Tick running time & live WS mark prices every single second
-    const tickExits = this.positionMonitor.tickRealtimePrices(
-      (sym) => this.wsManager.getMarkPrice(sym) ?? this.wsManager.getLastPrice(sym),
-      this.aiClub.getStyleParams()
-    );
+    const { exits: tickExits, stopLevelChanges: tickStopChanges } =
+      this.positionMonitor.tickRealtimePrices(
+        (sym) => this.wsManager.getMarkPrice(sym) ?? this.wsManager.getLastPrice(sym),
+        this.aiClub.getStyleParams()
+      );
+    this.handleStopLevelChanges(tickStopChanges);
     for (const ex of tickExits) {
       this.closePositionNow(ex.position, ex.reason).catch(() => {});
     }
@@ -528,6 +596,7 @@ export class HftBotEngine {
   }
 
   private async syncPositions1s() {
+    await this.drainPendingStopCancels();
     try {
       const risks = await this.restClient.getPositionRisks();
       this.apiConnected = true;
@@ -542,7 +611,7 @@ export class HftBotEngine {
         }
       }
 
-      const { exitsToExecute, externallyClosedPositions } =
+      const { exitsToExecute, externallyClosedPositions, stopLevelChanges } =
         this.positionMonitor.syncFromBinanceRisks(
           risks,
           (sym) => this.wsManager.getMarkPrice(sym),
@@ -550,7 +619,34 @@ export class HftBotEngine {
           this.aiClub.getStyleParams()
         );
 
+      this.handleStopLevelChanges(stopLevelChanges);
+
+      // Positions that survived a restart have no tracked stop: re-arm from the live level.
+      const liveKeys = new Set<string>();
+      const style = this.aiClub.getStyleParams();
+      for (const pos of this.positionMonitor.getOpenPositionsList()) {
+        const key = `${pos.symbol}:${pos.positionSide}`;
+        liveKeys.add(key);
+        if (this.exchangeStopOrderIds.has(key) || this.closingInFlight.has(key)) continue;
+        const decision = decideStop(
+          pos.roiPct,
+          pos.trailingActive,
+          pos.trailingStopRoiPct,
+          style.protectiveStopRoiPct
+        );
+        this.armExchangeStop(pos, decision.levelRoiPct, decision.kind).catch(() => {});
+      }
+      for (const key of Array.from(this.exchangeStopOrderIds.keys())) {
+        if (!liveKeys.has(key)) this.exchangeStopOrderIds.delete(key);
+      }
+      for (const key of Array.from(this.exchangeStopSkips)) {
+        if (!liveKeys.has(key)) this.exchangeStopSkips.delete(key);
+      }
+
       for (const extClosed of externallyClosedPositions) {
+        // The exchange stop closing the position IS the success case; withdraw whatever is left
+        // so it cannot flatten the next trade on the same symbol.
+        this.disarmExchangeStop(extClosed.symbol, extClosed.positionSide);
         if (!this.closingInFlight.has(`${extClosed.symbol}:${extClosed.positionSide}`)) {
           this.finalizeClosedTradePostMortem(
             extClosed,
@@ -569,6 +665,21 @@ export class HftBotEngine {
         logger.warn('MONITOR_1S', `1s Position sync warning: ${(err as Error).message}`);
       }
     }
+  }
+
+  /**
+   * Cached taker rate for the entry-side fee maths. Falls back to the standard omnibus rate
+   * and refreshes in the background: a cold cache must never block an entry, and the true
+   * rate is re-read before a fill is booked anyway.
+   */
+  private takerRateFor(symbol: string): number {
+    const cached = this.commissionMap.get(symbol);
+    if (cached) return cached;
+    this.restClient
+      .getTakerCommissionRate(symbol)
+      .then((rate) => this.commissionMap.set(symbol, rate))
+      .catch(() => {});
+    return 0.0005;
   }
 
   private async handle15sCandleClosed(symbol: string) {
@@ -604,6 +715,31 @@ export class HftBotEngine {
 
     const filter = this.restClient.getSymbolFilter(symbol);
     const minNotional = filter?.minNotional ?? 5;
+
+    // Fee-hurdle gate. This is the arithmetic behind most scalping books that lose: the
+    // round trip costs a fixed share of margin ROI, and the 15s structure has to be bigger
+    // than that twice over before the trade can end green. Leverage cancels out of the
+    // ratio, so no rung of the ladder can rescue a move too small to pay for itself.
+    const hurdle = clearsFeeHurdle(
+      stratEval.features.volatilityAtrPct,
+      this.takerRateFor(symbol),
+      Math.round(style.minLeverage),
+      style.minFeeHurdleMultiple
+    );
+    if (!hurdle.ok) {
+      this.cooldownUntilMap.set(symbol, Date.now() + 20_000);
+      logger.ai(
+        'EXECUTION',
+        `⛔ FEE HURDLE ${symbol} ${side}: 15s ATR excursion ${f6(
+          hurdle.expectedRoiPct
+        )}% ROI is only ${f6(
+          hurdle.ratio
+        )}x the ${f6(hurdle.hurdleRoiPct)}% round-trip taker cost (needs ${f6(
+          hurdle.requiredRatio
+        )}x) — skipping, the move cannot pay for its own exit.`
+      );
+      return;
+    }
 
     // Consult LangGraph 5-Agent Self-Learning Club
     const consensus = await this.aiClub.evaluateEntryCandidate({
@@ -693,8 +829,12 @@ export class HftBotEngine {
       const ladder: number[] = [];
       for (let lev = first; lev <= style.maxLeverage; lev++) ladder.push(lev);
       let lastErrorMsg = '';
+      let fill: { order: RawOrderResult; leverage: number } | null = null;
 
       for (const lev of ladder) {
+        // Deterministic per attempt and unique per send: it is the only handle that can
+        // answer "did the POST that timed out actually fill?" without placing a second order.
+        const clientOrderId = makeEntryClientOrderId(symbol, side, lev);
         try {
           logger.exec(
             'EXECUTION',
@@ -743,79 +883,304 @@ export class HftBotEngine {
             quantity: qtyStr,
             isCloseOrder: false,
             hedgeMode: this.hedgeMode,
+            newClientOrderId: clientOrderId,
           });
 
-          const executedQty = parseFloat(orderRes.executedQty || qtyStr) || qtyNum;
-          const fillPrice = parseFloat(orderRes.avgPrice || '0') || livePrice;
-          const takerRate = await this.restClient.getTakerCommissionRate(symbol);
-          this.commissionMap.set(symbol, takerRate);
+          if (isUnfilledOrderStatus(orderRes.status)) {
+            // The exchange answered, and the answer was "no position". Safe to step up.
+            lastErrorMsg = `${symbol} ${lev}x order came back ${orderRes.status} with ${orderRes.executedQty} filled`;
+            continue;
+          }
 
-          const initialMargin = (executedQty * fillPrice) / lev;
-          const estFees = executedQty * fillPrice * takerRate * 2;
-          features.leverageUsed = lev;
-
-          const newPos: OpenTradePosition = {
-            symbol,
-            side,
-            positionSide,
-            quantity: executedQty,
-            leverage: lev,
-            entryPrice: fillPrice,
-            markPrice: fillPrice,
-            initialMargin,
-            notionalValue: executedQty * fillPrice,
-            roiPct: 0,
-            grossPnl: 0,
-            binanceFees: estFees,
-            netPnl: -estFees,
-            commissionRate: takerRate,
-            openedAt: Date.now(),
-            runningTimeSec: 0,
-            trailingActive: false,
-            peakRoiPct: 0,
-            worstRoiPct: 0,
-            trailingStopRoiPct: null,
-            protectiveStopRoiPct: style.protectiveStopRoiPct,
-            lastCheckedAt: Date.now(),
-            entryFeatures: features,
-          };
-
-          this.positionMonitor.registerNewlyOpenedPosition(newPos);
-          this.cooldownUntilMap.set(symbol, Date.now() + 45_000);
-
-          logger.success(
-            'EXECUTION',
-            `✅ EXECUTED ${side} ${symbol} @ $${f6(fillPrice)} | Qty: ${f6(
-              executedQty
-            )} | Leverage: ${lev}x | Margin: $${f6(initialMargin)} | OrderID: ${
-              orderRes.orderId
-            }`
-          );
-
-          await this.syncAccountSummaryOnly();
-          this.broadcastSnapshot();
-          return;
+          fill = { order: orderRes, leverage: lev };
+          break;
         } catch (stepErr) {
           lastErrorMsg = (stepErr as Error).message;
-          if (lev < 15) {
+
+          if (!isAmbiguousOrderFailure(stepErr)) {
+            if (lev < style.maxLeverage) {
+              logger.warn(
+                'EXECUTION',
+                `⚠️ ${symbol} ${lev}x rejected before it could reach the book (${lastErrorMsg}) → Escalating to ${
+                  lev + 1
+                }x...`
+              );
+            }
+            continue;
+          }
+
+          // The request may have been booked. Ask Binance; never re-send blind.
+          const outcome = await this.resolveAmbiguousEntry(symbol, clientOrderId);
+          if (outcome.status === 'FILLED' && outcome.order) {
             logger.warn(
               'EXECUTION',
-              `⚠️ ${symbol} ${lev}x failed (${lastErrorMsg}) → Escalating immediately to ${
-                lev + 1
-              }x...`
+              `⚠️ ${symbol} ${lev}x POST did not answer (${lastErrorMsg}), but Binance confirms ${clientOrderId} = ${outcome.order.status}. Adopting that fill instead of re-sending.`
             );
+            fill = { order: outcome.order, leverage: lev };
+            break;
           }
+          if (outcome.status === 'ABSENT') {
+            if (lev < style.maxLeverage) {
+              logger.warn(
+                'EXECUTION',
+                `⚠️ ${symbol} ${lev}x never reached the book (${lastErrorMsg}) → Escalating to ${
+                  lev + 1
+                }x...`
+              );
+            }
+            continue;
+          }
+          // Unknown. If the order landed, the 1s position sync adopts it; re-sending at the
+          // next rung is how a real-money account ends up holding twice the intended size.
+          logger.error(
+            'EXECUTION',
+            `❌ ${symbol} ${lev}x entry outcome unknown (${lastErrorMsg}). Stopping the ladder without re-sending; position sync will adopt the fill if it landed.`
+          );
+          this.cooldownUntilMap.set(symbol, Date.now() + 60_000);
+          return;
         }
       }
 
-      // All 10x..15x attempts failed (e.g., symbol requires $100 MIN_NOTIONAL like BTCUSDT while max $2 * 15x = $30)
-      this.cooldownUntilMap.set(symbol, Date.now() + 5 * 60_000);
-      logger.error(
+      if (!fill) {
+        // Every rung failed before reaching the book (e.g. the symbol requires $100
+        // MIN_NOTIONAL like BTCUSDT while max $2 * 15x = $30).
+        this.cooldownUntilMap.set(symbol, Date.now() + 5 * 60_000);
+        logger.error(
+          'EXECUTION',
+          `❌ ${symbol} (${side}) failed across the ${first}x→${Math.round(
+            style.maxLeverage
+          )}x ladder. Final reason: ${lastErrorMsg}. Placed ${symbol} on 5m cooldown to protect API rate limit.`
+        );
+        return;
+      }
+
+      // A fill is confirmed. Nothing below this line may re-send an order.
+      const orderRes = fill.order;
+      const filledLeverage = fill.leverage;
+      const executedQty = parseFloat(orderRes.executedQty || '0') || 0;
+      const marketPrice =
+        this.wsManager.getLastPrice(symbol) || this.wsManager.getMarkPrice(symbol) || 0;
+      const fillPrice =
+        parseFloat(orderRes.avgPrice || '0') || parseFloat(orderRes.price || '0') || marketPrice;
+
+      if (!(executedQty > 0) || !(fillPrice > 0)) {
+        logger.error(
+          'EXECUTION',
+          `❌ ${symbol} reported ${orderRes.status} with no usable fill (qty ${orderRes.executedQty}, avg ${orderRes.avgPrice}). Leaving reconciliation to the 1s position sync.`
+        );
+        return;
+      }
+
+      const takerRate = await this.restClient.getTakerCommissionRate(symbol);
+      this.commissionMap.set(symbol, takerRate);
+
+      const initialMargin = (executedQty * fillPrice) / filledLeverage;
+      const estFees = executedQty * fillPrice * takerRate * 2;
+      features.leverageUsed = filledLeverage;
+
+      const newPos: OpenTradePosition = {
+        symbol,
+        side,
+        positionSide,
+        quantity: executedQty,
+        leverage: filledLeverage,
+        entryPrice: fillPrice,
+        markPrice: fillPrice,
+        initialMargin,
+        notionalValue: executedQty * fillPrice,
+        roiPct: 0,
+        grossPnl: 0,
+        binanceFees: estFees,
+        netPnl: -estFees,
+        commissionRate: takerRate,
+        openedAt: Date.now(),
+        runningTimeSec: 0,
+        trailingActive: false,
+        peakRoiPct: 0,
+        worstRoiPct: 0,
+        trailingStopRoiPct: null,
+        protectiveStopRoiPct: style.protectiveStopRoiPct,
+        entryProtectiveStopRoiPct: style.protectiveStopRoiPct,
+        lastCheckedAt: Date.now(),
+        entryFeatures: features,
+      };
+
+      this.positionMonitor.registerNewlyOpenedPosition(newPos);
+      this.cooldownUntilMap.set(symbol, Date.now() + 45_000);
+
+      // Exchange-side protection: if this process stalls, the stop still lives on Binance.
+      await this.armExchangeStop(newPos, style.protectiveStopRoiPct, 'GUARD');
+
+      logger.success(
         'EXECUTION',
-        `❌ ${symbol} (${side}) failed across full 10x→15x ladder. Final reason: ${lastErrorMsg}. Placed ${symbol} on 5m cooldown to protect API rate limit.`
+        `✅ EXECUTED ${side} ${symbol} @ $${f6(fillPrice)} | Qty: ${f6(
+          executedQty
+        )} | Leverage: ${filledLeverage}x | Margin: $${f6(initialMargin)} | OrderID: ${
+          orderRes.orderId
+        }`
       );
+
+      await this.syncAccountSummaryOnly();
+      this.broadcastSnapshot();
     } finally {
       this.openingInFlight.delete(symbol);
+    }
+  }
+
+  /**
+   * Resolve an entry POST whose answer we never got. Querying the client order id is the
+   * only safe move: -2013 (unknown order) proves it was never booked, a FILLED/PARTIALLY_FILLED
+   * status proves it was, and anything else stays UNKNOWN — which stops the ladder rather than
+   * risking a second position.
+   */
+  private async resolveAmbiguousEntry(
+    symbol: string,
+    clientOrderId: string
+  ): Promise<{ status: 'FILLED' | 'ABSENT' | 'UNKNOWN'; order?: RawOrderResult }> {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const order = await this.restClient.queryOrderByClientId(symbol, clientOrderId);
+        const status = (order?.status || '').toUpperCase();
+        const executedQty = parseFloat(order?.executedQty || '0');
+        if (status === 'FILLED' || status === 'PARTIALLY_FILLED' || executedQty > 0) {
+          return { status: 'FILLED', order };
+        }
+        if (status === 'REJECTED' || status === 'CANCELED' || status === 'EXPIRED') {
+          return { status: 'ABSENT' };
+        }
+      } catch (err) {
+        // -2013 / -2011: the order is unknown to Binance, so nothing was booked and the
+        // next rung of the ladder is safe.
+        const code = (err as { code?: number }).code;
+        if (code === -2013 || code === -2011) return { status: 'ABSENT' };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return { status: 'UNKNOWN' };
+  }
+
+  /**
+   * Put the protective exit on the exchange instead of only in this process. Placed
+   * before the older stop is withdrawn so there is never an unprotected window; the
+   * software 1 Hz guard keeps running as a backstop. Never throws — a failed arm must
+   * never look like a failed entry to the leverage ladder.
+   */
+  private async armExchangeStop(
+    pos: OpenTradePosition,
+    roiLevelPct: number,
+    kind: 'GUARD' | 'TRAIL'
+  ): Promise<void> {
+    const key = `${pos.symbol}:${pos.positionSide}`;
+    if (this.exchangeStopsDisabled || !this.restClient.hasCredentials()) return;
+
+    try {
+      const filter = this.restClient.getSymbolFilter(pos.symbol);
+      const raw = priceForRoi(pos.side, pos.entryPrice, pos.initialMargin, pos.quantity, roiLevelPct);
+      if (!(raw > 0)) throw new Error('computed stop price is not positive');
+      const stopPrice = filter
+        ? roundStopPrice(raw, filter.tickSize, filter.tickDecimals, pos.side)
+        : raw.toFixed(8);
+
+      const mark = pos.markPrice > 0 ? pos.markPrice : pos.entryPrice;
+      const onWrongSide =
+        pos.side === 'LONG' ? Number(stopPrice) >= mark : Number(stopPrice) <= mark;
+      if (onWrongSide) {
+        if (!this.exchangeStopSkips.has(key)) {
+          this.exchangeStopSkips.add(key);
+          logger.exec(
+            'EXCHANGE_STOP',
+            `${pos.symbol} ${kind} stop skipped: trigger ${stopPrice} is not beyond mark ${f6(
+              mark
+            )} — the live 1s guard owns this exit.`
+          );
+        }
+        return;
+      }
+
+      const res = await this.restClient.placeStopMarketClosePosition({
+        symbol: pos.symbol,
+        closeSide: pos.side === 'LONG' ? 'SELL' : 'BUY',
+        positionSide: pos.positionSide,
+        stopPrice,
+        hedgeMode: this.hedgeMode,
+      });
+
+      const previousId = this.exchangeStopOrderIds.get(key);
+      this.exchangeStopOrderIds.set(key, res.orderId);
+      this.exchangeStopSkips.delete(key);
+      if (previousId && previousId !== res.orderId) {
+        this.requestStopCancel(pos.symbol, previousId);
+      }
+
+      this.exchangeStopFailures = 0;
+      logger.success(
+        'EXCHANGE_STOP',
+        `🛡️ Binance-side ${kind} stop LIVE on ${pos.symbol} (${pos.side}) @ ${stopPrice} = ${f6(
+          roiLevelPct
+        )}% ROI | OrderID: ${res.orderId}`
+      );
+    } catch (err) {
+      const code = (err as { code?: number }).code;
+      this.exchangeStopFailures += 1;
+      // A parameter this endpoint will never accept: stop asking and rely on the software guard.
+      if (code === -1106 || code === -1117 || code === -4040 || code === -4062) {
+        this.exchangeStopsDisabled = true;
+        logger.error(
+          'EXCHANGE_STOP',
+          `Binance Portfolio Margin rejected stop orders (${code}: ${(err as Error).message}). Exchange-side stops disabled; the 1s software guard stays the only exit trigger.`
+        );
+        return;
+      }
+      if (this.exchangeStopFailures <= 3 || this.exchangeStopFailures % 25 === 0) {
+        logger.warn(
+          'EXCHANGE_STOP',
+          `Failed to arm ${kind} stop on ${pos.symbol}: ${(err as Error).message}`
+        );
+      }
+    }
+  }
+
+  private requestStopCancel(symbol: string, orderId: number): void {
+    this.pendingStopCancels.push({ symbol, orderId, attempts: 0 });
+  }
+
+  /** Stop orders must not outlive the position they protected, or they can flatten a later entry. */
+  private disarmExchangeStop(symbol: string, positionSide: string): void {
+    const key = `${symbol}:${positionSide}`;
+    this.exchangeStopSkips.delete(key);
+    const orderId = this.exchangeStopOrderIds.get(key);
+    if (!orderId) return;
+    this.exchangeStopOrderIds.delete(key);
+    this.requestStopCancel(symbol, orderId);
+  }
+
+  private async drainPendingStopCancels(): Promise<void> {
+    if (!this.pendingStopCancels.length || !this.restClient.hasCredentials()) return;
+    const queue = this.pendingStopCancels.splice(0, this.pendingStopCancels.length);
+
+    for (const item of queue) {
+      try {
+        await this.restClient.cancelOpenOrder(item.symbol, item.orderId);
+      } catch (err) {
+        const code = (err as { code?: number }).code;
+        // -2011: cancel of an unknown order. The stop already triggered or was cleared.
+        if (code === -2011) continue;
+        item.attempts += 1;
+        if (item.attempts < 5) {
+          this.pendingStopCancels.push(item);
+        } else {
+          logger.error(
+            'EXCHANGE_STOP',
+            `Could not withdraw stop ${item.orderId} on ${item.symbol} after 5 attempts: ${(err as Error).message}`
+          );
+        }
+      }
+    }
+  }
+
+  private handleStopLevelChanges(changes: StopLevelChange[]): void {
+    for (const change of changes) {
+      this.armExchangeStop(change.position, change.roiLevelPct, change.kind).catch(() => {});
     }
   }
 
@@ -823,6 +1188,10 @@ export class HftBotEngine {
     const posKey = `${pos.symbol}:${pos.positionSide}`;
     if (this.closingInFlight.has(posKey)) return false;
     this.closingInFlight.add(posKey);
+
+    // Withdraw the exchange stop before flattening so a late trigger cannot chase an
+    // already-closed position; re-armed in the catch if this close does not land.
+    this.disarmExchangeStop(pos.symbol, pos.positionSide);
 
     try {
       const filter = this.restClient.getSymbolFilter(pos.symbol);
@@ -857,6 +1226,12 @@ export class HftBotEngine {
       logger.error(
         'EXECUTION',
         `Failed to close ${pos.symbol} (${pos.side}): ${(err as Error).message}`
+      );
+      // The position is still open and now has no exchange stop — put the guard back.
+      await this.armExchangeStop(
+        pos,
+        this.aiClub.getStyleParams().protectiveStopRoiPct,
+        'GUARD'
       );
       return false;
     } finally {
@@ -917,6 +1292,8 @@ export class HftBotEngine {
       durationSec,
       exitReason,
       features: fallbackFeatures,
+      entryGuardRoiPct:
+        pos.entryProtectiveStopRoiPct ?? this.aiClub.getStyleParams().protectiveStopRoiPct,
     });
 
     const record: ClosedTradeRecord = {
@@ -1044,6 +1421,7 @@ export class HftBotEngine {
       winRatePct: stats.winRatePct,
       realizedNetPnlTotal: stats.realizedNetPnlTotal,
 
+      ledgerVersion: this.stateStore.getLedgerVersion(),
       pnlLedger,
       lessons,
       lessonPatterns: aggregateLessonPatterns(lessons),
@@ -1056,6 +1434,19 @@ export class HftBotEngine {
   }
 
   private broadcastSnapshot() {
+    if (this.snapshotSubscribers.size === 0) return;
+    // Several events land inside one tick (mark price, account update, style change) and the
+    // dashboard cannot tell them apart, so publish the merged state once per window instead of
+    // re-serialising the whole snapshot per event.
+    if (this.pendingBroadcast) return;
+    this.pendingBroadcast = setTimeout(() => {
+      this.pendingBroadcast = null;
+      this.emitSnapshot();
+    }, 120);
+    this.pendingBroadcast.unref?.();
+  }
+
+  private emitSnapshot() {
     if (this.snapshotSubscribers.size === 0) return;
     const snap = this.getSnapshot();
     for (const sub of this.snapshotSubscribers) {

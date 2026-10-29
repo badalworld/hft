@@ -6,6 +6,8 @@ import {
   ArrowUpRight,
   Crosshair,
   Flame,
+  TrendingDown,
+  TrendingUp,
   XCircle,
 } from 'lucide-react';
 import type { OpenTradePosition } from '../types/hft';
@@ -158,6 +160,22 @@ export const OpenTradesDeck: React.FC<OpenTradesDeckProps> = ({
                               netPositive ? 'led-mint led-blink' : 'led-coral led-blink-alarm'
                             } ${pos.trailingActive ? 'led-armed-ring' : ''}`}
                           />
+                          <TrendingUp
+                            className={`h-3.5 w-3.5 shrink-0 ${
+                              netPositive ? 'text-[#ADEBB3]' : 'hidden'
+                            }`}
+                            aria-hidden="true"
+                          />
+                          <TrendingDown
+                            className={`h-3.5 w-3.5 shrink-0 ${
+                              netPositive ? 'hidden' : 'text-[#FF857A]'
+                            }`}
+                            aria-hidden="true"
+                          />
+                          <span className="sr-only">
+                            {netPositive ? 'net profit' : 'net loss'}
+                            {pos.trailingActive ? ', trailing stop armed' : ''}
+                          </span>
                           <div>
                             <div className="font-mono-num text-xs font-bold text-white">
                               {pos.symbol}

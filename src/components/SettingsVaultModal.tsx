@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import type { DashboardSnapshot } from '../types/hft';
 import { fmtUsd6 } from '../utils/format';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 import { LotusSelect } from './LotusSelect';
 
 interface SettingsVaultModalProps {
@@ -27,7 +28,7 @@ interface SettingsVaultModalProps {
   ) => Promise<{ connected: boolean; message: string }>;
   onResetStartBalance: () => Promise<unknown>;
   onRescanIps: () => Promise<unknown>;
-  onBindLocalIp: (localAddress: string | null) => Promise<void>;
+  onBindLocalIp: (localAddress: string | null) => Promise<{ ok: boolean; message: string }>;
 }
 
 export const SettingsVaultModal: React.FC<SettingsVaultModalProps> = ({
@@ -49,6 +50,16 @@ export const SettingsVaultModal: React.FC<SettingsVaultModalProps> = ({
   } | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const copyTimerRef = React.useRef<number | null>(null);
+
+  const { panelRef, titleId } = useDialogA11y(open, onClose, 'hft-vault-title');
+
+  React.useEffect(
+    () => () => {
+      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+    },
+    []
+  );
 
   if (!open) return null;
 
@@ -64,8 +75,12 @@ export const SettingsVaultModal: React.FC<SettingsVaultModalProps> = ({
   const copyText = async (text: string, id: string) => {
     try {
       await navigator.clipboard.writeText(text);
+      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
       setCopiedId(id);
-      setTimeout(() => setCopiedId(null), 2000);
+      copyTimerRef.current = window.setTimeout(() => {
+        copyTimerRef.current = null;
+        setCopiedId(null);
+      }, 2000);
     } catch {
       // ignore clipboard error
     }
@@ -90,10 +105,15 @@ export const SettingsVaultModal: React.FC<SettingsVaultModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 backdrop-blur-md sm:p-6">
       <motion.div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         initial={{ opacity: 0, scale: 0.96, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.96 }}
-        className="skeuo-chassis skeuo-lotus-trim relative max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-2xl p-5 sm:p-6"
+        className="skeuo-chassis skeuo-lotus-trim relative max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-2xl p-5 sm:p-6 focus:outline-none"
       >
         <div className="lotus-ribbon absolute top-0 left-0 right-0 h-[3px]" />
 
@@ -104,11 +124,11 @@ export const SettingsVaultModal: React.FC<SettingsVaultModalProps> = ({
               <Shield className="h-5 w-5 text-[#EBAEE6]" />
             </div>
             <div>
-              <h2 className="font-crest text-lg font-bold tracking-wider text-lotus-crest">
+              <h2 id={titleId} className="font-crest text-lg font-bold tracking-wider text-lotus-crest">
                 HFT VAULT SETTINGS & IP WHITELIST
               </h2>
               <p className="text-xs text-[#d5b8b5]">
-                Production Binance USDⓈ-M Futures Credentials, Multi-IPv4 Whitelist & Start Balance Lock
+                Production Binance USDⓈ-M Futures through Portfolio Margin (PAPI), Multi-IPv4 Whitelist &amp; Start Balance Lock
               </p>
             </div>
           </div>
@@ -116,6 +136,7 @@ export const SettingsVaultModal: React.FC<SettingsVaultModalProps> = ({
           <button
             type="button"
             onClick={onClose}
+            aria-label="Close the vault settings panel"
             className="skeuo-btn rounded-xl p-2 text-[#fdf6f5]"
           >
             <X className="h-4 w-4" />
@@ -237,7 +258,10 @@ export const SettingsVaultModal: React.FC<SettingsVaultModalProps> = ({
                     <LotusSelect
                       size="sm"
                       value={ipReport?.boundLocalAddress || ''}
-                      onChange={(val) => onBindLocalIp(val || null)}
+                      onChange={async (val) => {
+                        const out = await onBindLocalIp(val || null);
+                        if (!out.ok) setSaveFeedback({ ok: false, msg: out.message });
+                      }}
                       ariaLabel="Outbound Socket Route"
                       className="min-w-[225px] font-mono-num"
                       options={[

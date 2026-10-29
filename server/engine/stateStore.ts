@@ -16,6 +16,8 @@ import { createDefaultStyleParams } from '../ai/agentClubGraph.js';
 import { createDefaultSystem1Weights } from '../ai/system1Primitives.js';
 import { prependLesson } from '../ai/lessonMemory.js';
 import { decryptSecret, encryptSecret } from '../utils/cryptoVault.js';
+import { f6 } from '../utils/format.js';
+import { logger } from '../utils/logger.js';
 
 export interface PersistedPositionMeta {
   symbol: string;
@@ -23,6 +25,7 @@ export interface PersistedPositionMeta {
   trailingActive: boolean;
   peakRoiPct: number;
   worstRoiPct: number;
+  entryProtectiveStopRoiPct?: number;
   entryFeatures?: EntryFeatureVector;
 }
 
@@ -67,10 +70,18 @@ interface RawVaultData {
 export class StateStore {
   private readonly filePath = path.resolve(process.cwd(), 'data', 'hft_vault.json');
   private data: RawVaultData;
+  private pendingWrite: NodeJS.Timeout | null = null;
+  private saveFailures = 0;
+  private dataWritten = false;
+  private needsMigrationSave = false;
+  private needsRecoverySave = false;
+  private ledgerVersion = 0;
 
   constructor() {
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
     this.data = this.loadFromDisk();
+    // Persist a repair immediately so it runs once, and a crash cannot replay it forever.
+    if (this.needsMigrationSave || this.needsRecoverySave) this.save();
   }
 
   private defaultData(): RawVaultData {
@@ -120,11 +131,37 @@ export class StateStore {
 
   private loadFromDisk(): RawVaultData {
     const def = this.defaultData();
-    try {
-      if (!fs.existsSync(this.filePath)) return def;
-      const raw = fs.readFileSync(this.filePath, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<RawVaultData>;
-      return {
+    if (!fs.existsSync(this.filePath)) return def;
+
+    // The vault holds the API keys for a live account. A truncated or half-written file must
+    // never resolve to "no credentials" and then be saved back over the real ones, so a parse
+    // failure falls through to the last good backup and quarantines the damaged file instead.
+    const candidates = [this.filePath, `${this.filePath}.bak`];
+    for (const [index, file] of candidates.entries()) {
+      let parsed: Partial<RawVaultData>;
+      try {
+        if (!fs.existsSync(file)) continue;
+        parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<RawVaultData>;
+      } catch (err) {
+        if (index === 0) {
+          this.quarantineCorrupt(file);
+          logger.error(
+            'STATE',
+            `⚠️ ${path.basename(file)} is unreadable (${(err as Error).message}). Quarantined it and trying the backup — credentials were NOT reset.`
+          );
+        }
+        continue;
+      }
+      if (index === 1) {
+        logger.warn(
+          'STATE',
+          'Recovered state from hft_vault.json.bak after the primary vault failed to parse.'
+        );
+        // Write the recovered copy straight back. Leaving the primary missing would hand the
+        // next boot an empty vault — the keys would survive only in a file nobody reads.
+        this.needsRecoverySave = true;
+      }
+      const merged: RawVaultData = {
         ...def,
         ...parsed,
         styleParams: { ...def.styleParams, ...(parsed.styleParams || {}) },
@@ -135,25 +172,109 @@ export class StateStore {
         },
         openPositionMeta: parsed.openPositionMeta || {},
         incomeLedger: { ...def.incomeLedger, ...(parsed.incomeLedger || {}) },
+        closedTrades: Array.isArray(parsed.closedTrades) ? parsed.closedTrades : [],
+        styleMutations: Array.isArray(parsed.styleMutations) ? parsed.styleMutations : [],
         lessons: Array.isArray(parsed.lessons) ? parsed.lessons : [],
         operatorDirectives: Array.isArray(parsed.operatorDirectives)
           ? parsed.operatorDirectives
           : [],
         operatorNotes: Array.isArray(parsed.operatorNotes) ? parsed.operatorNotes : [],
       };
+      this.migrateRetiredDefaults(merged);
+      return merged;
+    }
+    return def;
+  }
+
+  private quarantineCorrupt(file: string): void {
+    try {
+      const dest = `${file}.corrupt-${Date.now()}`;
+      fs.renameSync(file, dest);
+      logger.error('STATE', `Damaged vault kept for inspection as ${path.basename(dest)}.`);
     } catch {
-      return def;
+      // If even the rename fails, the next save() will overwrite; nothing else to try.
+    }
+  }
+
+  /**
+   * One-time repair of parameters whose shipped default was retired because it was wrong
+   * money-wise. The old protective guard sat at -9.5% ROI, which on a 10x book is a 0.95%
+   * price move — wider than most of the 15s structures this bot trades, so it was never a
+   * stop, only a liquidation race. A value the council or the operator moved to anything
+   * else is left alone.
+   */
+  private migrateRetiredDefaults(data: RawVaultData): void {
+    const retiredGuard = -9.5;
+    if (data.styleParams.protectiveStopRoiPct === retiredGuard) {
+      data.styleParams.protectiveStopRoiPct = createDefaultStyleParams().protectiveStopRoiPct;
+      this.needsMigrationSave = true;
+      logger.warn(
+        'STATE',
+        `Migrated the stored protective guard from ${f6(
+          retiredGuard
+        )}% to ${f6(
+          data.styleParams.protectiveStopRoiPct
+        )}% ROI and armed an exchange-side STOP_MARKET to match.`
+      );
     }
   }
 
   public save() {
+    // A concurrent writer would otherwise race on a shared temp name and rename half of
+    // someone else's payload over the vault.
+    const tmpPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
     try {
-      const tmpPath = `${this.filePath}.tmp`;
-      fs.writeFileSync(tmpPath, JSON.stringify(this.data, null, 2), 'utf8');
+      const json = JSON.stringify(this.data, null, 2);
+      fs.writeFileSync(tmpPath, json, 'utf8');
+      if (fs.existsSync(this.filePath)) {
+        fs.copyFileSync(this.filePath, `${this.filePath}.bak`);
+      }
       fs.renameSync(tmpPath, this.filePath);
-    } catch {
-      // ignore disk write race
+      if (this.pendingWrite) {
+        clearTimeout(this.pendingWrite);
+        this.pendingWrite = null;
+      }
+      this.dataWritten = true;
+    } catch (err) {
+      this.saveFailures += 1;
+      try {
+        fs.rmSync(tmpPath, { force: true });
+      } catch {
+        // best effort
+      }
+      logger.error(
+        'STATE',
+        `❌ Vault write FAILED (${(err as Error).message}). State kept in memory only — attempt #${
+          this.saveFailures
+        }. Trades, lessons and credentials are NOT durable until this clears.`
+      );
     }
+  }
+
+  /** Coalesces the 1 Hz position bookkeeping into one disk write per window. */
+  private scheduleSave(delayMs = 1500): void {
+    if (this.pendingWrite) return;
+    this.pendingWrite = setTimeout(() => {
+      this.pendingWrite = null;
+      this.save();
+    }, delayMs);
+    this.pendingWrite.unref?.();
+  }
+
+  /** Flush a debounced window immediately — call before anything reads the file or exits. */
+  public flushNow(): void {
+    if (!this.pendingWrite) return;
+    clearTimeout(this.pendingWrite);
+    this.pendingWrite = null;
+    this.save();
+  }
+
+  public getSaveFailures(): number {
+    return this.saveFailures;
+  }
+
+  public hasWrittenSinceLoad(): boolean {
+    return this.dataWritten;
   }
 
   public getCredentials(): { apiKey: string; apiSecret: string } {
@@ -324,7 +445,9 @@ export class StateStore {
 
   public setOpenPositionMeta(key: string, meta: PersistedPositionMeta) {
     this.data.openPositionMeta[key] = meta;
-    this.save();
+    // Runs on the 1 Hz tick for every open position. Writing the whole vault once per second
+    // put a synchronous disk write inside the exit-decision path; coalesce it instead.
+    this.scheduleSave();
   }
 
   public removeOpenPositionMeta(key: string) {
@@ -360,6 +483,7 @@ export class StateStore {
     this.data.realizedNetPnlTotal += trade.netPnl;
     this.data.styleParams = updatedStyle;
     this.data.system1Weights = updatedWeights;
+    this.ledgerVersion += 1;
     this.save();
   }
 
@@ -369,7 +493,17 @@ export class StateStore {
 
   public updateIncomeLedger(patch: Partial<PersistedIncomeLedger>) {
     this.data.incomeLedger = { ...this.data.incomeLedger, ...patch };
+    this.ledgerVersion += 1;
     this.save();
+  }
+
+  /**
+   * Bumped whenever settled-trade analytics change. The live stream carries these blocks only
+   * to a client that has not yet seen the current version, so a dashboard polling once a
+   * second does not re-download the whole trade history on every tick.
+   */
+  public getLedgerVersion(): number {
+    return this.ledgerVersion;
   }
 
   public getClosedTradeHistory(): ClosedTradeRecord[] {
@@ -382,6 +516,7 @@ export class StateStore {
 
   public recordLesson(lesson: TradeLesson) {
     this.data.lessons = prependLesson(this.data.lessons, lesson);
+    this.ledgerVersion += 1;
     this.save();
   }
 

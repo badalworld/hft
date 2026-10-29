@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   BrainCircuit,
@@ -10,6 +10,7 @@ import {
   TrendingUp,
   X,
 } from 'lucide-react';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 import type {
   AiCouncilBallot,
   DashboardSnapshot,
@@ -112,7 +113,7 @@ interface AiAgentClubModalProps {
   open: boolean;
   snapshot: DashboardSnapshot | null;
   onClose: () => void;
-  onUpdateLocalAi: (cfg: Partial<LocalDecisionConfig>) => Promise<void>;
+  onUpdateLocalAi: (cfg: Partial<LocalDecisionConfig>) => Promise<{ ok: boolean; message: string }>;
   onAddDirective: (d: {
     kind: OperatorDirectiveKind;
     symbol?: string;
@@ -151,6 +152,21 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
   const [noteText, setNoteText] = useState('');
   const [briefingError, setBriefingError] = useState('');
   const [briefingBusy, setBriefingBusy] = useState(false);
+  const [runtimeMessage, setRuntimeMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  const { panelRef, titleId } = useDialogA11y(open, onClose, 'hft-ai-club-title');
+
+  // The live vault config outranks the defaults captured on first mount, or a saved endpoint
+  // would silently revert in the form every time the panel is reopened.
+  useEffect(() => {
+    if (!open) return;
+    const cfg = snapshot?.localDecisionConfig;
+    if (!cfg) return;
+    setProvider(cfg.provider);
+    setEndpointUrl(cfg.endpointUrl);
+    setModelName(cfg.modelName);
+    setRuntimeMessage(null);
+  }, [open, snapshot?.localDecisionConfig]);
 
   if (!open) return null;
 
@@ -166,7 +182,13 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
 
   const handleSaveRuntime = async (e: React.FormEvent) => {
     e.preventDefault();
-    await onUpdateLocalAi({ provider, endpointUrl, modelName });
+    const out = await onUpdateLocalAi({ provider, endpointUrl, modelName });
+    setRuntimeMessage({
+      ok: out.ok,
+      text: out.ok
+        ? `Applied: ${provider} on ${endpointUrl}.`
+        : out.message || 'The server refused that runtime.',
+    });
   };
 
   const handleAddRule = async (e: React.FormEvent) => {
@@ -223,7 +245,12 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
       <motion.div
         initial={{ opacity: 0, scale: 0.96, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        className="skeuo-chassis skeuo-lotus-trim relative max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-2xl p-5 sm:p-6"
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="skeuo-chassis skeuo-lotus-trim relative max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-2xl p-5 focus:outline-none sm:p-6"
       >
         <div className="lotus-ribbon absolute top-0 left-0 right-0 h-[3px]" />
 
@@ -234,7 +261,10 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
               <BrainCircuit className="h-5 w-5 text-[#EBAEE6]" />
             </div>
             <div>
-              <h2 className="font-crest text-lg font-bold tracking-wider text-lotus-crest">
+              <h2
+                id={titleId}
+                className="font-crest text-lg font-bold tracking-wider text-lotus-crest"
+              >
                 SELF-LEARNING AI AGENT CLUB ($0.00 ZERO-COST QUANT COUNCIL)
               </h2>
               <p className="text-xs text-[#d5b8b5]">
@@ -246,6 +276,7 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
           <button
             type="button"
             onClick={onClose}
+            aria-label="Close the AI Agent Club panel"
             className="skeuo-btn rounded-xl p-2 text-[#fdf6f5]"
           >
             <X className="h-4 w-4" />
@@ -879,6 +910,16 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
                 </div>
               </div>
             </div>
+            {runtimeMessage && (
+              <p
+                role="status"
+                className={`mt-2 font-mono-num text-[10px] ${
+                  runtimeMessage.ok ? 'text-[#ADEBB3]' : 'text-[#FF857A]'
+                }`}
+              >
+                {runtimeMessage.text}
+              </p>
+            )}
           </form>
         </div>
       </motion.div>

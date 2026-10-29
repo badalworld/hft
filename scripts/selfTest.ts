@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type {
+  AdaptiveStyleParams,
   ClosedTradeRecord,
   OperatorDirective,
   OperatorDirectiveKind,
@@ -16,6 +17,12 @@ import {
   createDefaultStyleParams,
 } from '../server/ai/agentClubGraph.js';
 import { describeDirective, findVetoingDirective } from '../server/ai/operatorDirectives.js';
+import {
+  castBallots,
+  type CouncilContext,
+  type MutationProposal,
+} from '../server/ai/improvementCouncil.js';
+import { diagnoseLoss } from '../server/ai/lossAutopsy.js';
 import { buildTradeLesson } from '../server/ai/lessonMemory.js';
 import { createDefaultSystem1Weights } from '../server/ai/system1Primitives.js';
 import { MarketScanner40 } from '../server/engine/marketScanner.js';
@@ -23,6 +30,25 @@ import { buildPnlLedger } from '../server/engine/pnlLedger.js';
 import { PositionMonitor1s } from '../server/engine/positionMonitor1s.js';
 import { StateStore } from '../server/engine/stateStore.js';
 import { f6, formatOrderQty } from '../server/utils/format.js';
+import {
+  clearsFeeHurdle,
+  expectedExcursionRoiPct,
+  roundTripFeeHurdleRoiPct,
+} from '../server/utils/feeHurdle.js';
+import {
+  isAmbiguousOrderFailure,
+  isUnfilledOrderStatus,
+  makeEntryClientOrderId,
+} from '../server/utils/orderSafety.js';
+import { decideStop, priceForRoi, roundStopPrice } from '../server/utils/stops.js';
+import { sanitizeStyleParams } from '../server/utils/styleGuard.js';
+import {
+  checkDecisionEndpoint,
+  LOCAL_DECISION_PROVIDERS,
+  providerNeedsEndpoint,
+} from '../server/utils/netGuard.js';
+import { isValidIpv4 } from '../server/utils/ipDiscovery.js';
+import { HEAVY_SNAPSHOT_KEYS, lightenSnapshot } from '../server/utils/streamFrame.js';
 
 async function runSelfTests() {
   const originalCwd = process.cwd();
@@ -91,6 +117,25 @@ async function runSelfTests() {
     assert.equal(stratEval.stage, 'CONFIRMED_SIGNAL');
     assert.equal(stratEval.triggered, true);
 
+    console.log('3b. Verifying the round-trip fee hurdle gate...');
+    // Fees charge notional, ROI measures margin, so the break-even hurdle is 2*taker*leverage.
+    // At 10x / 0.05% that is +1.000000% ROI — a +0.6% spike is not a near miss, it is a loss.
+    assert.equal(f6(roundTripFeeHurdleRoiPct(0.0005, 10)), '1.000000');
+    assert.equal(f6(roundTripFeeHurdleRoiPct(0.0005, 15)), '1.500000');
+    assert.equal(f6(expectedExcursionRoiPct(0.1, 10)), '1.000000');
+    const thinMove = clearsFeeHurdle(0.1, 0.0005, 10, style.minFeeHurdleMultiple);
+    assert.equal(thinMove.ok, false, 'a one-round-trip move must never clear a two-round-trip bar');
+    assert.equal(f6(thinMove.ratio), '1.000000');
+    const realMove = clearsFeeHurdle(0.3, 0.0005, 10, style.minFeeHurdleMultiple);
+    assert.equal(realMove.ok, true);
+    assert.equal(f6(realMove.ratio), '3.000000');
+    // Leverage cancels: stepping the ladder upward never made a small move affordable, it
+    // only raised the chance of being liquidated on the way to the same fee loss.
+    assert.equal(
+      f6(clearsFeeHurdle(0.3, 0.0005, 10, 2).ratio),
+      f6(clearsFeeHurdle(0.3, 0.0005, 15, 2).ratio)
+    );
+
     console.log('4. Verifying LangGraph 5-Agent Club Entry Gate & Post-Mortem Self-Learning...');
     const club = new AiAgentClubOrchestrator({
       styleParams: style,
@@ -131,6 +176,7 @@ async function runSelfTests() {
       durationSec: 42,
       exitReason: 'PROTECTIVE_STOP_LOSS',
       features: { ...stratEval.features, aiConfidence: entryDecision.confidence },
+      entryGuardRoiPct: club.getStyleParams().protectiveStopRoiPct,
     });
     assert.equal(pmLoss.analysis.verdict, 'LOSS_PREMATURE_PULLBACK');
     assert.equal(pmLoss.analysis.autopsy?.rootCause, 'ENTRY_TOO_EARLY');
@@ -187,10 +233,101 @@ async function runSelfTests() {
     assert.equal(f6(activePos.netPnl), '0.099940');
 
     // Next 1s tick: mark retraces to 10.085 after peaking at 10.10 (+10% ROI -> trail ~8.85% -> retrace to +4.25% fires exit!)
-    monitor.tickRealtimePrices(() => 10.10, style); // Peak +10.000000% ROI
-    const exits = monitor.tickRealtimePrices(() => 10.08, style); // +8.000000% ROI <= trail ~8.85%
-    assert.equal(exits.length, 1);
-    assert.ok(exits[0].reason.includes('TRAILING_STOP_HIT'));
+    const peakTick = monitor.tickRealtimePrices(() => 10.10, style); // Peak +10.000000% ROI
+    assert.equal(peakTick.exits.length, 0);
+    const trailTick = monitor.tickRealtimePrices(() => 10.08, style); // +8.000000% ROI <= trail ~8.85%
+    assert.equal(trailTick.exits.length, 1);
+    assert.ok(trailTick.exits[0].reason.includes('TRAILING_STOP_HIT'));
+
+    console.log('5b. Verifying the capital guard is live even after the trail arms...');
+    // A crash to -40% ROI on an ARMED position must be labelled as the guard it actually
+    // breached, not as a profit trail — the loss autopsy classifies on this string.
+    const crashTick = monitor.tickRealtimePrices(() => 9.6, style);
+    assert.equal(crashTick.exits.length, 1);
+    assert.ok(crashTick.exits[0].reason.includes('PROTECTIVE_STOP_LOSS'));
+    assert.ok(!crashTick.exits[0].reason.includes('TRAILING'));
+
+    // Guard precedence math, independent of the monitor:
+    const armedBelowGuard = decideStop(-12, true, -0.5, style.protectiveStopRoiPct);
+    assert.equal(armedBelowGuard.triggered, true);
+    assert.equal(armedBelowGuard.kind, 'GUARD');
+    assert.equal(armedBelowGuard.levelRoiPct, -0.5);
+    // The hole that used to leave a position with no exit: armed, but no trail level.
+    const armedNoTrailLevel = decideStop(-12, true, null, style.protectiveStopRoiPct);
+    assert.equal(armedNoTrailLevel.triggered, true);
+    assert.equal(armedNoTrailLevel.kind, 'GUARD');
+    const stillRunning = decideStop(9.5, true, 8.85, style.protectiveStopRoiPct);
+    assert.equal(stillRunning.triggered, false);
+    const armedTrailHit = decideStop(8, true, 8.85, style.protectiveStopRoiPct);
+    assert.equal(armedTrailHit.triggered, true);
+    assert.equal(armedTrailHit.kind, 'TRAIL');
+    const guardHitUnarmed = decideStop(-7, false, null, style.protectiveStopRoiPct);
+    assert.equal(guardHitUnarmed.triggered, true);
+    assert.equal(guardHitUnarmed.kind, 'GUARD');
+
+    // ROI -> trigger price must invert exactly, and tick-rounding must never cross the mark.
+    const longTrigger = priceForRoi('LONG', 10.0, 2.0, 2, -6.0);
+    assert.equal(f6(longTrigger), '9.940000');
+    assert.equal(f6(priceForRoi('SHORT', 10.0, 2.0, 2, -6.0)), '10.060000');
+    assert.equal(roundStopPrice(9.9437, 0.001, 3, 'LONG'), '9.943');
+    assert.equal(roundStopPrice(10.0562, 0.001, 3, 'SHORT'), '10.057');
+
+    console.log('5c. Verifying ladder retry safety and entry-guard attribution...');
+    // A client order id is the only handle that can answer "did the POST that timed out fill?"
+    // Binance caps it at 36 chars of [A-Za-z0-9_-], and the uniqueness lives in the tail, so a
+    // long symbol must lose characters from its name and never from its timestamp.
+    const cid = makeEntryClientOrderId('1000000BOBUSDT', 'LONG', 12);
+    assert.ok(cid.length <= 36, `clientOrderId too long: ${cid.length}`);
+    assert.ok(/^hft[A-Za-z0-9_-]+$/.test(cid), `bad charset: ${cid}`);
+    assert.ok(cid.includes('-L12x-'), `leverage tag lost: ${cid}`);
+    const longCid = makeEntryClientOrderId('1000000HOTUSDTABCDE', 'SHORT', 15);
+    assert.equal(longCid.length, 36);
+    assert.ok(/-[LS]\d+x-[0-9a-z]{6,8}$/.test(longCid), `timestamp tail lost: ${longCid}`);
+    assert.notEqual(makeEntryClientOrderId('BTCUSDT', 'LONG', 10), makeEntryClientOrderId('BTCUSDT', 'SHORT', 10));
+
+    assert.equal(isAmbiguousOrderFailure({ code: -1013 }), false, 'filter rejection must be safe to escalate');
+    assert.equal(isAmbiguousOrderFailure({ code: -2019 }), false, 'margin rejection must be safe to escalate');
+    assert.equal(isAmbiguousOrderFailure({ code: -9999 }), false, 'local governor never reached Binance');
+    assert.equal(isAmbiguousOrderFailure({ code: -2010 }), true, 'unknown code must be resolved by query');
+    assert.equal(isAmbiguousOrderFailure(new Error('socket hang up')), true, 'timeout must never blind-retry');
+
+    assert.equal(isUnfilledOrderStatus('FILLED'), false);
+    assert.equal(isUnfilledOrderStatus('PARTIALLY_FILLED'), false);
+    assert.equal(isUnfilledOrderStatus('EXPIRED'), true);
+    assert.equal(isUnfilledOrderStatus('REJECTED'), true);
+    assert.equal(isUnfilledOrderStatus(''), true);
+
+    // The same -12% fill is a depth failure under a -6% guard and an entry failure under the
+    // -9.5% guard that was live when the trade was booked. Judging old exits on new levels
+    // invents slippage that never happened, so the autopsy must use the entry-time guard.
+    const slipFill = {
+      symbol: 'SLIPUSDT',
+      side: 'LONG' as const,
+      netPnl: -0.24,
+      grossPnl: -0.24,
+      binanceFees: 0.02,
+      initialMargin: 2.0,
+      leverage: 10,
+      entryPrice: 10.0,
+      exitPrice: 9.88,
+      finalRoiPct: -12.0,
+      peakRoiPct: 0.4,
+      worstRoiPct: -12.0,
+      durationSec: 18,
+      exitReason: 'PROTECTIVE_STOP_LOSS (ROI -12.000000% <= Guard -6.000000%)',
+      features: stratEval.features,
+      params: style,
+    };
+    assert.equal(
+      diagnoseLoss({ ...slipFill, entryGuardRoiPct: -6.0 }).rootCause,
+      'EXIT_SLIPPAGE',
+      'a real hole through the live guard must be called slippage'
+    );
+    assert.equal(
+      diagnoseLoss({ ...slipFill, entryGuardRoiPct: -9.5 }).rootCause,
+      'ENTRY_TOO_EARLY',
+      'a 2.5% ROI overshoot is 0.25% of price at 10x — that is the entry, not the book'
+    );
 
     console.log('6. Verifying Improvement Council ballots, lesson memory & shared-memory veto...');
     assert.ok(pmLoss.analysis.councilBallots && pmLoss.analysis.councilBallots.length > 0);
@@ -253,6 +390,79 @@ async function runSelfTests() {
     assert.ok(
       Math.abs(recalled.confidence - (plainDecision.confidence - 0.06)) < 1e-9,
       `memory did not discount the probability: ${plainDecision.confidence} -> ${recalled.confidence}`
+    );
+
+    console.log('6b. Verifying the council can actually approve a risk reduction...');
+    // Three traps used to freeze the riskest levers in the book: the guard lives on a
+    // negative scale (so -9.5 -> -6.0 was scored as a LOOSENING and refused), maxLeverage
+    // had no step cap and no verdict ever listed it, and the capital seat vetoed the word
+    // "maxLeverage" regardless of which way the number moved.
+    const councilParams: AdaptiveStyleParams = {
+      ...createDefaultStyleParams(),
+      protectiveStopRoiPct: -9.5,
+      maxLeverage: 15,
+    };
+    const slippageCtx: CouncilContext = {
+      params: councilParams,
+      verdict: 'LOSS_MOMENTUM_REVERSAL',
+      side: 'LONG',
+      patterns: [],
+      lessonKey: 'L',
+      recentLessons: [],
+      rootCause: 'EXIT_SLIPPAGE',
+    };
+    const ballotFor = (prop: MutationProposal) =>
+      castBallots([prop], slippageCtx)[0];
+    const levCut = ballotFor({
+      param: 'maxLeverage',
+      target: 14,
+      min: 5,
+      max: 15,
+      reason: 'stop filled through the guard',
+    });
+    assert.equal(levCut.approved, true, `leverage cut denied: ${JSON.stringify(levCut.votes)}`);
+    assert.equal(levCut.forCount, 3);
+    const guardTighten = ballotFor({
+      param: 'protectiveStopRoiPct',
+      target: -8.0,
+      min: -12,
+      max: -3,
+      reason: 'halve the loss tail',
+    });
+    assert.equal(guardTighten.approved, true, `guard tightening denied: ${JSON.stringify(guardTighten.votes)}`);
+    // Widening the same guard is a genuine risk increase and must stay blocked without history.
+    assert.equal(
+      ballotFor({ param: 'protectiveStopRoiPct', target: -12.0, min: -12, max: -3, reason: 'give it room' })
+        .approved,
+      false,
+      'loosening the capital guard passed with no earned history'
+    );
+    // A reckless step is refused even when the direction is right — the council moves in stages.
+    const guardLeap = ballotFor({
+      param: 'protectiveStopRoiPct',
+      target: -6.0,
+      min: -12,
+      max: -3,
+      reason: 'jump three points at once',
+    });
+    assert.equal(guardLeap.approved, false, 'a 3.5-point guard leap passed the owner step cap');
+    // Doubling the size of every trade is the one thing a losing post-mortem may not do.
+    assert.equal(
+      ballotFor({ param: 'baseMarginUsd', target: 4.0, min: 1, max: 5, reason: 'make it back faster' })
+        .approved,
+      false,
+      'the capital seat allowed a size increase'
+    );
+    const hermesOn = (ctx: CouncilContext) =>
+      castBallots(
+        [{ param: 'maxLeverage', target: 14, min: 5, max: 15, reason: 'fee hurdle is the loss' }],
+        ctx
+      )[0].votes.find((v) => v.agent === 'hermes-evolver');
+    assert.equal(hermesOn(slippageCtx)?.vote, 'FOR', 'autopsy cause did not justify its own lever');
+    assert.equal(
+      hermesOn({ ...slippageCtx, rootCause: undefined })?.vote,
+      'AGAINST',
+      'a verdict that does not blame sizing let a maxLeverage rewrite pass its coherence seat'
     );
 
     console.log('7. Verifying cooldown swaps the scanner basket and PNL ledger maths...');
@@ -492,6 +702,187 @@ async function runSelfTests() {
     );
     assert.equal(store.removeOperatorNote(note.id), true);
     assert.equal(store.getOperatorNotes().length, 0);
+
+    console.log('9. Verifying vault quarantine, guard migration and off-path persistence...');
+    const vaultDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hft-vault-'));
+    process.chdir(vaultDir);
+    try {
+      const vaultPath = path.resolve(vaultDir, 'data', 'hft_vault.json');
+      const readVault = () => JSON.parse(fs.readFileSync(vaultPath, 'utf8'));
+
+      const storeA = new StateStore();
+      storeA.setCredentials('AK-1234567890', 'SK-abcdefghij');
+      storeA.setStyleParams({ ...createDefaultStyleParams(), protectiveStopRoiPct: -9.5 });
+      assert.equal(readVault().styleParams.protectiveStopRoiPct, -9.5);
+
+      // The -9.5% guard is a retired default, not an operator decision: on a 10x book it is a
+      // 0.95% price move, wider than most 15s structures, so it has to migrate or the
+      // tightened stop never reaches the instance that is actually trading.
+      const storeB = new StateStore();
+      assert.equal(
+        storeB.getStyleParams().protectiveStopRoiPct,
+        -6.0,
+        'stored -9.5% guard was not migrated to the new default'
+      );
+      assert.equal(storeB.getCredentials().apiKey, 'AK-1234567890', 'migration lost the vault keys');
+      assert.equal(readVault().styleParams.protectiveStopRoiPct, -6.0, 'migration was not made durable');
+      assert.equal(
+        new StateStore().getStyleParams().protectiveStopRoiPct,
+        -6.0,
+        'migration replayed on a second boot'
+      );
+
+      // A level anybody chose deliberately must survive untouched.
+      storeB.setStyleParams({ ...createDefaultStyleParams(), protectiveStopRoiPct: -7.25 });
+      assert.equal(new StateStore().getStyleParams().protectiveStopRoiPct, -7.25);
+
+      // Half-written vault (crash mid-save) must never resolve to "no credentials" and then
+      // be written back over the real keys.
+      fs.copyFileSync(vaultPath, `${vaultPath}.bak`);
+      fs.writeFileSync(vaultPath, '{"encryptedApiKey": "trunc', 'utf8');
+      const storeC = new StateStore();
+      assert.equal(
+        storeC.getCredentials().apiKey,
+        'AK-1234567890',
+        'a corrupt vault wiped the stored API keys'
+      );
+      assert.equal(storeC.getStyleParams().protectiveStopRoiPct, -7.25);
+      const vaultFiles = fs.readdirSync(path.dirname(vaultPath));
+      assert.equal(
+        vaultFiles.filter((f) => f.includes('.corrupt-')).length,
+        1,
+        'damaged vault was destroyed instead of quarantined'
+      );
+      assert.equal(readVault().styleParams.protectiveStopRoiPct, -7.25, 'recovery was not rewritten');
+
+      // The 1 Hz bookkeeping must not put a synchronous whole-vault write on the exit path.
+      const storeD = new StateStore();
+      storeD.setOpenPositionMeta('METAUSDT:BOTH', {
+        symbol: 'METAUSDT',
+        openedAt: 1,
+        trailingActive: false,
+        peakRoiPct: 0,
+        worstRoiPct: 0,
+        entryFeatures: stratEval.features,
+      });
+      assert.equal(
+        readVault().openPositionMeta['METAUSDT:BOTH'],
+        undefined,
+        'a 1 Hz position tick wrote the vault synchronously'
+      );
+      storeD.flushNow();
+      assert.ok(readVault().openPositionMeta['METAUSDT:BOTH'], 'flushNow did not persist the meta');
+      storeD.removeOpenPositionMeta('METAUSDT:BOTH');
+      assert.equal(readVault().openPositionMeta['METAUSDT:BOTH'], undefined);
+      assert.equal(storeD.getSaveFailures(), 0);
+
+      // The live stream resends the settled-trade blocks only to a client that has not seen the
+      // current version, so every writer of that history has to bump it.
+      const versionBefore = storeD.getLedgerVersion();
+      storeD.recordClosedTrade(
+        mk('VERUSDT', 'LONG', 0.1, 0.2, 0.1, t0),
+        null,
+        createDefaultStyleParams(),
+        createDefaultSystem1Weights()
+      );
+      assert.equal(storeD.getLedgerVersion(), versionBefore + 1, 'a settled trade did not bump the ledger version');
+      storeD.updateIncomeLedger({ fundingFeeTotal: 0.01 });
+      assert.equal(storeD.getLedgerVersion(), versionBefore + 2, 'an income refresh did not bump the ledger version');
+      storeD.setCredentials('AK-1234567890', 'SK-abcdefghij');
+      assert.equal(storeD.getLedgerVersion(), versionBefore + 2, 'a light-only change bumped the ledger version');
+    } finally {
+      process.chdir(originalCwd);
+      fs.rmSync(vaultDir, { recursive: true, force: true });
+    }
+
+    console.log(
+      '10. Verifying the settings-route guards (style-parameter bounds + decision-endpoint SSRF)...'
+    );
+    {
+      const style = createDefaultStyleParams();
+      const ok = sanitizeStyleParams(style, { protectiveStopRoiPct: -6, minFeeHurdleMultiple: 2.5 });
+      assert.equal(ok.rejected.length, 0, `a safe change was refused: ${ok.rejected.join('; ')}`);
+      assert.equal(ok.accepted.protectiveStopRoiPct, -6);
+
+      // One field out of bounds must not poison the fields beside it, but a margin large
+      // enough to consume the account never lands.
+      const mixed = sanitizeStyleParams(style, { baseMarginUsd: 4000, cooldownSecondsAfterLoss: 45 });
+      assert.equal(mixed.accepted.baseMarginUsd, undefined);
+      assert.equal(mixed.accepted.cooldownSecondsAfterLoss, 45);
+      assert.ok(mixed.rejected.some((r) => r.includes('baseMarginUsd')));
+
+      // A positive guard would close every position the instant it fills.
+      assert.equal(sanitizeStyleParams(style, { protectiveStopRoiPct: 2 }).accepted.protectiveStopRoiPct, undefined);
+      for (const bad of [NaN, Infinity, 'abc', null, {}, [1]]) {
+        const r = sanitizeStyleParams(style, { minAiConfidenceScore: bad as never });
+        assert.equal(r.accepted.minAiConfidenceScore, undefined, `${String(bad)} reached the book`);
+      }
+      // The dashboard sends text inputs as strings; those are still numbers.
+      assert.equal(sanitizeStyleParams(style, { minAiConfidenceScore: '0.62' }).accepted.minAiConfidenceScore, 0.62);
+
+      // Keys that are not parameters must not be persisted into the vault and echoed back.
+      const injected = sanitizeStyleParams(style, { apiKey: 'stolen', engineRunning: true });
+      assert.equal(Object.keys(injected.accepted).length, 0);
+      assert.equal(injected.rejected.length, 2);
+
+      // Cross-parameter relationships use the live values, not just the request.
+      const inverted = sanitizeStyleParams({ ...style, minLeverage: 8 }, { maxLeverage: 4 });
+      assert.equal(inverted.accepted.maxLeverage, undefined);
+      assert.equal(inverted.accepted.minLeverage, undefined);
+      assert.equal(
+        sanitizeStyleParams({ ...style, trailingTriggerRoiPct: 5 }, { trailingFloorRoiPct: 9 })
+          .accepted.trailingFloorRoiPct,
+        undefined,
+        'a locked floor above the trigger would exit on open'
+      );
+
+      assert.equal(isValidIpv4('172.22.224.63'), true);
+      assert.equal(isValidIpv4('999.1.1.1'), false);
+      assert.equal(isValidIpv4('127.0.0.1:11434'), false);
+
+      const endpoint = (u: string) => checkDecisionEndpoint(u);
+      for (const good of ['http://127.0.0.1:11434', 'http://localhost:11434', 'http://[::1]:11434', 'http://192.168.1.9:8080']) {
+        assert.equal(endpoint(good).ok, true, `refused the local model server ${good}`);
+      }
+      // The whole point of the allowlist: this process is signed into a money API.
+      for (const bad of [
+        'http://169.254.169.254/latest/meta-data/',
+        'http://metadata.google.internal/',
+        'https://api.someone-else.com',
+        'http://attacker@127.0.0.1',
+        'http://127.0.0.1:11434/?probe=1',
+        'file:///etc/passwd',
+        '127.0.0.1:11434',
+        '',
+      ]) {
+        assert.equal(endpoint(bad).ok, false, `accepted the endpoint "${bad}"`);
+        assert.ok(endpoint(bad).reason.length > 0, `no reason given for "${bad}"`);
+      }
+      assert.equal(endpoint('http://127.0.0.1:11434/v1/').normalizedUrl, 'http://127.0.0.1:11434/v1/');
+      assert.equal(providerNeedsEndpoint('builtin'), false);
+      assert.equal(providerNeedsEndpoint('ollama_nimble'), true);
+      assert.equal(LOCAL_DECISION_PROVIDERS.includes('gpt_http' as never), false);
+
+      // A light frame must omit the settled-trade blocks entirely: the dashboard merges frames
+      // over its own state, and an explicit undefined would blank the history on screen.
+      const frame = lightenSnapshot({
+        timestamp: 5,
+        ledgerVersion: 3,
+        currentEquity: 11.2,
+        recentClosedTrades: [mk('LIGHTUSDT', 'LONG', 0.1, 0.2, 0.1, t0)],
+        styleMutations: [],
+        pnlLedger: { stats: {}, points: [], income: {} },
+        lessons: [],
+        lessonPatterns: [],
+      } as never);
+      const asRecord = frame as unknown as Record<string, unknown>;
+      assert.equal(asRecord.timestamp, 5, 'lightening dropped live fields');
+      assert.equal(asRecord.ledgerVersion, 3);
+      for (const key of HEAVY_SNAPSHOT_KEYS) {
+        assert.ok(!(key in asRecord), `light frame still carried ${key} as "${String(asRecord[key])}"`);
+      }
+      assert.equal(HEAVY_SNAPSHOT_KEYS.length, 5);
+    }
 
     console.log('✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!');
   } finally {

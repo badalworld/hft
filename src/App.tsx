@@ -17,6 +17,7 @@ export const App: React.FC = () => {
     snapshot,
     logs,
     wsConnected,
+    feedStatus,
     actionBusy,
     toggleEngine,
     saveCredentials,
@@ -37,6 +38,23 @@ export const App: React.FC = () => {
   const [pnlLedgerOpen, setPnlLedgerOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const toastTimerRef = React.useRef<number | null>(null);
+
+  const showToast = (message: string, ms = 5200) => {
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    setToastMsg(message);
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
+      setToastMsg(null);
+    }, ms);
+  };
+
+  React.useEffect(
+    () => () => {
+      if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    },
+    []
+  );
 
   const errorCount = useMemo(
     () => logs.filter((l) => l.level === 'ERROR').length,
@@ -46,15 +64,11 @@ export const App: React.FC = () => {
   const handleToggleEngine = async (next: boolean) => {
     if (next && !snapshot?.apiConfigured) {
       setSettingsOpen(true);
-      setToastMsg('Input your Binance API Key & Secret Key in Vault Settings to arm live trading.');
-      window.setTimeout(() => setToastMsg(null), 5000);
+      showToast('Input your Binance API Key & Secret Key in Vault Settings to arm live trading.');
       return;
     }
     const res = await toggleEngine(next);
-    if (!res.running && next) {
-      setToastMsg(res.message);
-      window.setTimeout(() => setToastMsg(null), 5500);
-    }
+    if (!res.running && next) showToast(res.message);
   };
 
   return (
@@ -67,15 +81,17 @@ export const App: React.FC = () => {
               initial={{ opacity: 0, y: -12 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -12 }}
+              role="alert"
               className="skeuo-chassis flex items-center justify-between gap-3 rounded-xl border border-[#FF857A]/60 px-4 py-3 text-xs text-[#ffe5e2]"
             >
               <div className="flex items-center gap-2.5">
-                <AlertTriangle className="h-4 w-4 shrink-0 text-[#FF857A]" />
+                <AlertTriangle className="h-4 w-4 shrink-0 text-[#FF857A]" aria-hidden="true" />
                 <span>{toastMsg}</span>
               </div>
               <button
                 type="button"
                 onClick={() => setToastMsg(null)}
+                aria-label="Dismiss the notice"
                 className="text-[#c7a8a5] hover:text-white cursor-pointer"
               >
                 ✕
@@ -88,6 +104,7 @@ export const App: React.FC = () => {
         <HeaderChassis
           snapshot={snapshot}
           wsConnected={wsConnected}
+          feedStatus={feedStatus}
           actionBusy={actionBusy}
           errorCount={errorCount}
           onToggleEngine={handleToggleEngine}

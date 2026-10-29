@@ -3,13 +3,13 @@
 
   <br />
 
-  [![Version](https://img.shields.io/badge/Version-1.4.0-6B403C?style=for-the-badge)](#whats-new-in-v140)
+  [![Version](https://img.shields.io/badge/Version-1.5.0-6B403C?style=for-the-badge)](#whats-new-in-v150)
   [![Exchange](https://img.shields.io/badge/Exchange-Binance%20Portfolio%20Margin%20(UM)-F0B90B?style=for-the-badge)](https://www.binance.com/en/futures)
   [![Execution](https://img.shields.io/badge/Execution-15s%20Candles%20%7C%201s%20Monitor-ADEBB3?style=for-the-badge)](#6-real-time-15-second-candle-engine--pullback-strategy)
   [![Transport](https://img.shields.io/badge/Transport-WebSocket%20%2B%20Auto%20REST%20Failover-8FD6FF?style=for-the-badge)](#4-market-data-transport-resilience-ws--rest-failover)
-  [![AI Club](https://img.shields.io/badge/AI%20Club-LangGraph%20%2B%20System--1%20(%240%20Fee)-EBAEE6?style=for-the-badge)](#7-zero-cost-self-learning-ai-agent-club)
+  [![AI Club](https://img.shields.io/badge/AI%20Club-LangGraph%20%2B%20System--1%20(%240%20Fee)-EBAEE6?style=for-the-badge)](#9-zero-cost-self-learning-ai-agent-club)
   [![Verified](https://img.shields.io/badge/Status-Live%20Real--Money%20Verified-4ECDC4?style=for-the-badge)](#2-execution-ledger--live-verified)
-  [![UI](https://img.shields.io/badge/UI%2FUX-Lotus%20Garden%20Skeuomorphism-FF857A?style=for-the-badge)](#8-lotus-garden-luxury-skeuomorphism-uiux)
+  [![UI](https://img.shields.io/badge/UI%2FUX-Lotus%20Garden%20Skeuomorphism-FF857A?style=for-the-badge)](#10-lotus-garden-luxury-skeuomorphism-uiux)
 </div>
 
 ---
@@ -25,7 +25,55 @@
 
 ---
 
-## What's New in `v1.4.0`
+## What's New in `v1.5.0`
+
+**This release is the audit of a book that keeps losing, and it goes after the arithmetic rather than the aesthetics.** `109` settled closes on this account read `59.633028%` win rate against a `-$2.571798` net — and the gross figure underneath it is only `-$0.386237`. **The strategy is roughly break-even before fees and `2.185561` USDT of Binance commission is what actually empties the till.** The average winner nets `+$0.090161` while the average loser costs `-$0.191643`, a `2.13:1` asymmetry that needs a `67.94%` win rate to break even. Nothing in the entry logic can close that gap; only an exit that keeps more of what it earns and an entry that refuses moves too small to pay for themselves can. That is what this release builds.
+
+### Why the dashboard stopped refreshing
+
+The feed was not one bug, it was five, and the visible symptom — a screen that freezes while the engine is trading — was the least interesting of them:
+
+| Cause | What was actually wrong | Fix |
+| :--- | :--- | :--- |
+| **A half-open socket looks connected** | `ws.readyState === OPEN` stays true after the peer vanishes without a close frame, so the client reported "connected" forever and rendered nothing. Browsers cannot observe WebSocket protocol pings at all. | Application-level `PING`/`PONG` on both ends. The server heartbeats every `10s` and terminates a client that never answers; the client pings every `5s` and drops its own socket after `13s` without a reply. |
+| **No fallback when the socket is down** | The REST snapshot route existed, but nothing polled it. A dropped feed meant a dead dashboard until a manual reload. | A `2s` watchdog classifies the feed as **`live` / `polling` / `stalled` / `offline`** and polls `/api/snapshot` every `3s` whenever the socket is not live. The header now shows which of the four states you are in — the old badge silently lied. |
+| **Frames arrived out of order** | A slow REST response could land after a newer WebSocket frame and roll the screen backwards. | Every applied frame is stamped; `applySnapshot` rejects anything older than the last one accepted. |
+| **Every tick re-serialised the entire snapshot fifteen times** | Each of the fifteen broadcast sites in the engine built and stringified a full snapshot per `1s` tick, per subscriber. | `broadcastSnapshot()` now coalesces to one emit per `120ms`, and the heavy blocks are version-gated (below). |
+| **Nothing recovered from a sleep or a tab switch** | A laptop lid closed for twenty minutes left a stale screen with a healthy-looking socket. | `visibilitychange` + `focus` fetch immediately and force a reconnect; reconnect backoff is `1s → ×2 → 15s` with `0.8–1.2×` jitter so fifty tabs cannot stampede the server. |
+
+**The heavy blocks are now version-gated.** `recentClosedTrades`, `styleMutations`, `pnlLedger`, `lessons` and `lessonPatterns` are the bulk of the payload and they only change when a trade settles, so `stateStore` carries a `ledgerVersion` that bumps on `recordClosedTrade`, `updateIncomeLedger` and `recordLesson` and travels in the snapshot. A client whose `ledgerVersion` already matches receives a light frame with those five keys deleted and merges them from its own copy; a mismatch gets the full payload. Per-client backpressure stops the server from buffering a flood for a client that cannot read it: frames are skipped past `1 MB` of `bufferedAmount` and the client is evicted past `30` consecutive skips.
+
+### The readout was ugly because it was honest to six decimals
+
+`fmtUsd6` on a live equity changes below the fourth decimal every tick, so the odometer rolled constantly and read as noise rather than a number. The big figures now use **`fmtUsd2`** — cents, which is what an odometer can actually show — while the exact `0.000000` value stays as text beside it, unchanged. The glyphs themselves were rebuilt: chamfered segment joints with a `1px` gap so segments meet like a real display instead of fusing into a blob, an unlit **ghost** of all seven segments behind every digit so a `1` sits in a `8`-shaped socket instead of floating, a `3`-copy cyclic strip that always rolls the **shortest path** (`9 → 0` now moves one step right, not nine steps left, and the strip silently re-centres once it settles), and a static two-layer bloom. Motion is a spring (`stiffness 220`, `damping 30`), staggered right-to-left, and `prefers-reduced-motion` renders a static glyph with no animation at all.
+
+### Six execution fixes, all of them money
+
+| Fix | Detail |
+| :--- | :--- |
+| **Exit precedence, then a stop the exchange enforces** | The protective guard tightened from **`-9.500000%`** to **`-6.000000%`** ROI, and the monitor now evaluates the guard before the trail so a position cannot be re-classified as a trailing exit on the way through. The software guard is backed by an **exchange-side `STOP_MARKET`** with `closePosition:'true'`, `workingType:'MARK_PRICE'` and `priceProtect:'TRUE'` placed the moment a position opens — so a `1s` poll gap, a crashed process, or a dead network no longer leaves a live position with no stop at all. `closePosition` is used instead of a quantity so the trigger always matches the live size, and the ROI→price inversion rounds *toward* the mark, never across it. |
+| **The leverage ladder can no longer fill twice** | A rejected order used to be re-sent at the next rung. Binance rejects some orders *after* matching them, so the old path could open two positions on one signal. Now only a **pre-fill** rejection set (`-4164`, `-4148`, `-4165`, `-1013` on quantity, `-2019` margin) is safe to escalate; `-2013` / `-2011` / a non-numeric code / a timeout / any `5xx` is **ambiguous** and is resolved by `GET /papi/v1/um/order?origClientOrderId` — the order is never re-sent, only looked up. |
+| **The improvement council can actually act** | Ballots were being tallied and then discarded, and two parameters were voted on with inverted polarity. `HIGHER_IS_TIGHTER` now states the sign for all sixteen parameters — `protectiveStopRoiPct` is inverted because it lives on a negative scale, so **`-6.0` is tighter than `-9.5` even though the number went up** — and `MAX_STEP` caps how far one post-mortem may move anything. Sizing levers get the smallest steps in the book (`baseMarginUsd 0.5`, one leverage rung) because a bigger bet is a looser stance, never a stricter one. |
+| **An entry must be able to pay for its own exit** | New `minFeeHurdleMultiple` (**`2.0`**, owner seat Alpha Scout, step `0.25`) gates on the measured `15s` ATR excursion: the expected ROI move must clear the round-trip taker cost **twice over** before the club is even consulted. Leverage cancels out of that ratio, so no rung of the ladder ever makes a small move winnable — the gate rejects the trade instead of escalating into it. A rejected symbol gets a `20s` cooldown and an `EXECUTION` log line quoting all three numbers. |
+| **The vault cannot corrupt itself** | Persistence is debounced, and a torn or unparseable `hft_vault.json` no longer wipes the ledger: load falls through to the last good backup and the damaged file is **quarantined** rather than deleted. |
+| **`EXIT_SLIPPAGE` no longer steals the diagnosis** | A fill past the guard used to be reported as the root cause on every trade that slipped, which is a cost of doing business, not a reason. Slippage now only wins when the depth failure is real; otherwise the autopsy names the entry defect that actually lost the money — and the avoidance rule is carried into the next entry in the same band. |
+
+### The settings routes were writing raw JSON into live trading parameters
+
+`POST /api/settings/style-params` took the request body and stored it. `POST /api/settings/local-ai` stored an arbitrary URL that the money process would then `fetch`. `POST /api/settings/bind-ip` stored any string as the local source address for every signed request. All three are closed:
+
+- **`server/utils/styleGuard.ts`** bounds all sixteen parameters, coerces numeric strings, drops unknown keys and non-finite values, and then checks *relationships*: `minLeverage > maxLeverage` deletes both, `trailingFloorRoiPct` above `trailingTriggerRoiPct` is dropped. A route that accepts nothing returns `400` with the reasons; the UI shows them instead of silently reverting.
+- **`server/utils/netGuard.ts`** allows only `localhost`, `::1`, and an IPv4 literal in `127/8`, `10/8`, `172.16–31` or `192.168/16` — and rejects embedded credentials, query strings, fragments and non-`http(s)` schemes. That closes the `169.254.169.254` / `metadata.google.internal` path that would have had the trading process fetch cloud instance credentials on every decision.
+- **Bind-IP** is validated as an IPv4 literal at the route *and* at boot: a bad address already sitting in the vault is discarded with a `STATE` warning instead of being applied to the REST client and the WebSocket manager, where it would have made every signed request fail to leave the machine.
+
+> **Verification status, stated separately.** `npm run typecheck` is clean, `vite build` succeeds (`481.75 kB` bundle), and `npm test` passes all **10 groups** — the two new ones covering exactly the work above: the ledger version bumps on a settled trade and an income update but *not* on a credential write, `lightenSnapshot` removes all five heavy keys and keeps `timestamp`/`ledgerVersion`, every style-guard bound and relationship rule, every `isValidIpv4` case, and all eight refused decision endpoints each returning a non-empty reason. The odometer, the four hardened dialogs, the feed badge and the settings refusals were driven in the browser against the live account. **How the audit was run, stated honestly:** the CodeRabbit CLI is not installed on this machine, so the full-codebase audit was performed with reviewer agents plus static verification (`tsc`, `vite build`, the self-test suite, and line-by-line reads of every money path) rather than that tool. **What has not been done: the running backend has not been restarted.** Positions were open, so the new server code — the exchange-side stop, the ladder resolution, the version-gated stream — is not yet executing on this account. It goes live on the next restart, and the restart should happen when the book is flat.
+
+
+
+<details>
+<summary><b>What's New in <code>v1.4.0</code> — drawn LED console, typed loss autopsy, operator briefing</b></summary>
+
+<br />
 
 **The console now reads like an instrument, and every losing trade has to explain itself in numbers before the club is allowed to change anything.** Version 1.4.0 replaces the two headline numbers with drawn seven-segment LED readouts, makes running P&L visible on each open slot, and — the part that actually changes behaviour — turns the loss post-mortem into a typed root-cause diagnosis whose avoidance rule is recalled on the next entry in the same setup band. It also opens a direct channel from the operator to the agents, with a hard split between what binds and what only informs.
 
@@ -51,6 +99,8 @@ Captured live from `snapshot.pnlLedger.stats` at `2026-10-28T22:30:48Z` on this 
 | **Operator briefing — two tiers, and they are not the same tier** | Binding standing orders (`STAND_DOWN_ALL`, `STAND_DOWN_SYMBOL`, `BLOCK_LONG`, `BLOCK_SHORT`, `MAX_CONCURRENT_POSITIONS`, `RSI_GATE`, `MIN_24H_MOVE`, `MAX_24H_OVEREXTENSION`) are evaluated **mechanically after the council approves**, so a veto log line means the AI Club genuinely wanted the trade and was overruled: *"OPERATOR RULE vetoed X LONG that the AI Club approved — Maximum 24h move before it is too late: 45.000000% (the move is spent)"*. Each rule counts how many entries it blocked. Advisory free-text notes are quoted into Alpha Scout and Leverage Architect before they vote — and can never gate an order. English is not parsed into trading logic on purpose: a rule that cannot be misread is a rule that cannot be quietly ignored. |
 
 > **Verification status, stated separately.** The LED readouts and the blinking slot LEDs are live-verified on this account right now — the readouts were measured glyph-by-glyph against `/api/snapshot` (`13.972454` and `11.370420` rendered exactly, including the roll caught mid-frame), and all five open slots were observed pulsing coral-fast with one mint-slow, matching their real net P&L. The autopsy, the standing-rule recall, and the veto path are proven by `npm test` (now **8 groups**): a fixture that goes `-$10.2%` before ever printing `+0.8%` must diagnose `ENTRY_TOO_EARLY`, its rule must be recalled on the next entry in the band, an `RSI_GATE` must veto a LONG the club approved and increment its counter, a lifted rule must stop vetoing, and a briefing note must **not** change an approval. The directive and note HTTP routes were exercised against an isolated, credential-free instance of the new server — add, toggle, reject-on-bad-input, and persistence across a restart including a vault written before these fields existed. What has **not** yet been seen on screen is the autopsy panel itself: the running engine predates this code, so no closed trade on this account carries an `autopsy` field yet. It renders on the first losing close after the backend restarts.
+
+</details>
 
 <details>
 <summary><b>What's New in <code>v1.3.0</code> — settled income, PNL Ledger, shared memory, improvement council</b></summary>
@@ -144,7 +194,7 @@ Every claim below was observed on a live, armed, real-money session — not asse
 | **Strategy logic is genuinely varied, not degenerate** | Across the 40-asset scanner, sampled three times consecutively and stable: `rsi15s` → **39 distinct values**, `pullbackDepthPct` → 40, `orderflowDeltaRatio` → 37, `candleCount15s` → 29, and **zero** assets pinned at the degenerate `50.000000`. Stages observed: `COOLDOWN`, `MONITORING`, `PULLBACK_DETECTED`, `CONFIRMED_SIGNAL`, `IN_POSITION`. |
 | **Self-heals a blocked WebSocket** | REST feed engaged with no operator action and restored candle diversity from the flat `79 / 50.000000 / 0 / 1.000000` dead state. Still running in fallback as of `2026-10-28T22:30:48Z` — `wsConnected: false`, weight `765 / 2,400`, mean REST round trip `315 ms` — and the strategy is still producing varied, actionable diagnostics on all 40 assets. |
 | **AI Club genuinely learns** | Across the first run: 39 consecutive post-mortems, 37 persisted style mutations, each recording the parameter and its value before and after. `minAiConfidenceScore` walked `0.560 → 0.552 → 0.544 → 0.536 → 0.551 → 0.566`, and after two premature-entry losses Hermes tightened three gates at once — `minOrderflowDeltaRatio 1.180 → 1.220`, `pullbackRsiShortMin 48 → 49`, `minAiConfidenceScore 0.536 → 0.551` — then raised `trailingFloorRoiPct 3.650 → 3.770` in response to the fee-drag breakeven. The full ledger of what the loop has produced since is in [§9](#9-zero-cost-self-learning-ai-agent-club). |
-| **Type-safe & verified** | `npm run typecheck` → exit 0. All 8 self-test suites → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
+| **Type-safe & verified** | `npm run typecheck` → exit 0. `vite build` → exit 0. All **10** self-test groups → `✅ ALL HFT QUANTITATIVE & EXECUTION ENGINE SELF-TESTS PASSED!` |
 
 ---
 
@@ -171,6 +221,26 @@ Captured live from `snapshot.pnlLedger.stats` at `2026-10-28T22:30:48Z` — the 
 | Avg win / avg loss (net) | `+$0.087500` / `-$0.210504` |
 
 > **Read this honestly.** Win rate and net PNL disagree, and the reason is in the last two rows: the average loss is `2.41×` the average win, so this payoff needs a `70.6%` win rate to break even and the book prints `58.974359%`. Being right 59 times in 100 does not pay for a `-$0.210504` average loser next to a `+$0.087500` average winner. The table is an accounting record, not a performance claim — strategy edge remains an open question, and fees alone (`$1.563932`) exceed the entire gross result of `-$1.147189`. This is exactly the asymmetry [§9](#9-zero-cost-self-learning-ai-agent-club)'s loss autopsy is built to attack.
+
+### The same ledger thirty-one closes later (`v1.5.0` capture)
+
+Captured live from `snapshot.pnlLedger.stats` at `2026-10-29T02:52:39Z`, on the same account and the same running engine.
+
+| Readout | Value | `78` → `109` change |
+| :--- | ---: | :--- |
+| Total trades | `109` | `+31` |
+| Win trades / loss trades | `65` / `44` | `+19` / `+12` |
+| **Win rate** | `59.633028%` | `+0.66` points |
+| Long quantity / win rate | `96` / `60.416667%` | `+26` / `+0.42` points |
+| Short quantity / win rate | `13` / `53.846154%` | `+5` / `+3.85` points |
+| Gross PNL | `-$0.386237` | **improved `+$0.760952`** |
+| Total Binance platform fees | `-$2.185561` | `-$0.621629` more paid |
+| Funding fees settled on bot symbols | `+$0.096482` | received, not paid |
+| **Net PNL after fees** | **`-$2.571798`** | `+$0.139323` better |
+| Best / worst close (net) | `+$0.271791` / `-$0.309310` | best improved, worst unchanged |
+| Avg win / avg loss (net) | `+$0.090161` / `-$0.191643` | asymmetry `2.13:1` (was `2.41:1`) |
+
+**This table is the entire argument for `v1.5.0`.** Thirty-one more closes moved the win rate by `0.66` points — the learning loop is not finding a better entry, because entry accuracy was never the binding constraint. Gross PNL improved by `+$0.760952` and net improved by only `+$0.139323`, because `31` more round trips cost `$0.621629` in commission. **The strategy is now close to break-even before fees, and fees are the whole loss.** The payoff asymmetry narrowed from `2.41:1` to `2.13:1` — which still needs a `67.94%` win rate the book has never printed. Nothing about raising or lowering leverage changes this: the hurdle is `2 × taker × leverage` on margin ROI while the move available is a price move, and leverage cancels out of the ratio. That is why `v1.5.0` stops trying to win on accuracy and starts refusing trades that cannot pay for their own exit (`minFeeHurdleMultiple`) and stops giving back captured profit to a loose trail (`-6.0` guard, precedence fix, exchange-side stop).
 
 ### First continuous session, in close order
 
@@ -319,7 +389,7 @@ flowchart TB
         SCAN40["Top-40 24h Market Scanner\n(20 Max Positive + 20 Max Negative)"]
         STRAT["15s Pullback + Confirmation Detector"]
         LADDER["$2.000000 Margin Executor\n(10x → 11x → 12x → 13x → 14x → 15x)"]
-        MON1S["1.000000s Position Monitor\n(+5% ROI Trail · -9.5% Protective Stop)"]
+        MON1S["1.000000s Position Monitor\n(+5% ROI Trail · -6% Protective Stop\n+ exchange-side STOP_MARKET)"]
         VAULT["AES-256-GCM Local Vault\n(Fixed Start Balance + API Keys + AI Brain)"]
     end
 
@@ -382,9 +452,10 @@ Because Binance USDⓈ-M Futures REST `/fapi/v1/klines` only supports intervals 
 | **Universe Size** | **40 Assets** (`20` Positive + `20` Negative) | Ranks 24h `priceChangePercent` continuously: Top 20 gainers (`LONG` only) and Top 20 losers (`SHORT` only). |
 | **Execution Timeframe** | **15-Second (`15s`) Candles** | Real-time UTC-aligned `15,000ms` candles from `<symbol>@aggTrade` WebSocket ticks, **or the REST `/fapi/v1/trades` sweep when the stream starves**, plus `/fapi/v1/aggTrades` warmup. |
 | **Base Margin / Trade** | **`$2.000000` USDT** | Dedicated base margin per position entry. |
-| **Leverage Fallback Ladder** | **`10x → 11x → 12x → 13x → 14x → 15x`** | Attempts `10x` first. If order execution, `MIN_NOTIONAL`, or `LOT_SIZE` `minQty`/`stepSize` fails at `10x`, automatically escalates `11x`, `12x`, `13x`, `14x`, up to `15x`. |
+| **Fee Hurdle Gate** | **`2.00x` round-trip taker cost (`minFeeHurdleMultiple`)** | Before an entry is approved, the 15-second ATR excursion is compared against the round-trip taker cost (`2 × feeRate × notional`). A candidate that cannot expectedly move at least **twice** its own round-trip cost is rejected outright and its symbol gets a `20s` cooldown, so the book stops paying fees on moves too small to ever net positive. The multiple is a council-tunable parameter, not a constant. |
+| **Leverage Fallback Ladder** | **`10x → 11x → 12x → 13x → 14x → 15x`** | Attempts `10x` first. If order execution, `MIN_NOTIONAL`, or `LOT_SIZE` `minQty`/`stepSize` fails at `10x`, automatically escalates `11x`, `12x`, `13x`, `14x`, up to `15x`. Only a **pre-fill** rejection may escalate; an ambiguous answer is resolved by reading `GET /papi/v1/um/order?origClientOrderId` before any re-send, so a ladder step can never double-fill. |
 | **Profit Target & Trail** | **`+5.000000%` ROI → Trailing Stop** | The instant ROI hits `+5.000000%`, Trailing Stop arms, locks a fee-positive profit floor, and trails peak ROI dynamically to capture maximum profit. |
-| **Protective Stop** | **`-9.500000%` ROI** | Hard catastrophic-exposure floor on every open position, independent of the trail. Verified live: fired on 2 of 9 closed trades. Note the **achieved** exit can be worse than the guard — one `FIGHTUSDT` close landed at `-12.090464%` because a thin perpetual gapped through the stop between 1-second polls. Budget for `guard + slippage`, not `guard`. |
+| **Protective Stop** | **`-6.000000%` ROI** (`-9.500000%` before `v1.5.0`) | Hard catastrophic-exposure floor on every open position, independent of the trail, evaluated **before** the trailing branch so a breach can never be re-labelled a trailing exit. Every position also carries an **exchange-side `STOP_MARKET`** (`closePosition:'true'`, `workingType:'MARK_PRICE'`, `priceProtect:'TRUE'`) placed at open, so the floor survives a dead process or a `1s` poll gap. The **achieved** exit can still be worse than the guard — one `FIGHTUSDT` close landed at `-12.090464%` against the old `-9.500000%` level because a thin perpetual gapped through the stop between polls. Budget for `guard + slippage`, not `guard`. |
 | **Open Trade Check** | **Every `1.000000` Second** | Dedicated 1-second heartbeat reconciled with `/papi/v1/um/positionRisk` + live mark prices from `!markPrice@arr@1s` **or** the 1s REST price poll. |
 | **Capital Allocation Cap** | **`95.000000%` of Equity** | Uses up to 95% of unified `accountEquity` for trade execution. When free budget in the 95% pool drops below `$2.000000`, **Market Scanner automatically pauses** and focuses 100% on open running positions. |
 | **Start Balance Rule** | **Fixed on 1st API Connection** | Captured automatically the very first time Binance API connects and locked permanently until you click **Reset Start Balance** in Settings. |
@@ -413,7 +484,7 @@ TRAILING_STOP_HIT (ROI 4.053556% <= Trail 4.260723%, Peak +5.410723%)
 PROTECTIVE_STOP_LOSS (ROI -12.090464% <= Guard -9.500000%)
 ```
 
-The second line is the honest caveat: the guard fires the instant the poll sees the breach, but on a thin perpetual the fill lands past the level. Treat `-9.5%` as a *trigger*, not a guaranteed loss ceiling.
+The second line is the honest caveat: the guard fires the instant the poll sees the breach, but on a thin perpetual the fill lands past the level. Treat the guard as a *trigger*, not a guaranteed loss ceiling — which is exactly why `v1.5.0` also parks a `STOP_MARKET` on the exchange itself.
 
 ---
 
@@ -480,6 +551,8 @@ Post-mortem is now `forensicAuditor → improvementDraft → councilVote → app
 
 **Two of three `FOR` votes are required before a parameter moves.** Rejected proposals stay on the record as rejected, each vote carries its reason, and the whole ballot is written into the trade's post-mortem so the discussion can be read back per trade in the AI Club panel. Loosening a gate additionally requires earned evidence (`looseningIsEarned`: ≥4 samples, ≥60% win rate, positive net) — a single lucky trade cannot relax the system.
 
+`v1.5.0` closed two integrity holes in that ballot. Directional semantics were ambiguous for parameters where a **larger** number is the **stricter** setting (`minFeeHurdleMultiple`, `protectiveStopRoiPct` magnitude, `cooldownSecondsAfterLoss`), so a "tightening" proposal could be balloted as a loosening and vice versa; the council now carries an explicit `HIGHER_IS_TIGHTER` table and classifies every mutation by which bound it moves, not by its sign. Separately, a mutation whose step exceeded `MAX_STEP` for that parameter was previously reaching the vote at all — it is now refused before a seat spends a ballot on it, so the tape only ever shows proposals the council could legitimately accept.
+
 ### What the loop has actually produced so far
 
 This is not a demo mode, and the artifacts are inspectable on disk rather than asserted here. Counted from the live vault and the same `2026-10-28T22:30:48Z` snapshot as [§2](#2-execution-ledger--live-verified):
@@ -524,14 +597,19 @@ The primary screen remains pure and distraction-free—displaying **only** your 
 
 ### The two big numbers are drawn, not typeset
 
-Start Balance and Current Equity are seven-segment LED readouts (`src/components/SevenSegmentNumber.tsx`). Segments `a`–`g` are bevelled hexagonal polygons defined once in a hidden `<defs>` sheet; every digit column is its own `<svg>` viewport clipping an 11-glyph strip that rolls into place on a spring, staggered right-to-left so the least-significant digit settles last — the way a mechanical odometer and an LED panel both behave.
+Start Balance and Current Equity are seven-segment LED readouts (`src/components/SevenSegmentNumber.tsx`). Segments `a`–`g` are chamfered hexagonal polygons with a `1px` gap at every joint, defined once in a hidden `<defs>` sheet; every digit column is its own `<svg>` viewport clipping a **`30`-glyph strip** (`0–9` three times over) that rolls into place on a spring (`stiffness 220`, `damping 30`), staggered right-to-left so the least-significant digit settles last — the way a mechanical odometer and an LED panel both behave.
 
+- **The odometer reads cents, not noise.** A live equity changes below the fourth decimal every tick, and a display that rolls every second is unreadable rather than precise. The big figures use `fmtUsd2`; the exact `0.000000` value stays as text beside it, so nothing is lost — only the flicker is.
+- **It always rolls the short way.** The strip picks the nearest of three copies, so `9 → 0` moves one column right instead of nine columns left, and the position silently re-centres once the spring settles. A five-decimal readout used to spin the whole strip on every tick.
+- **Unlit segments are drawn.** Behind every digit sits a `7`-segment ghost at `0.075` opacity, so a `1` occupies an `8`-shaped socket instead of floating in empty space — the detail that makes it read as a panel rather than as floating bars.
 - **Equity changes colour on its own meaning**: mint `#ADEBB3` while ahead of the locked start balance, coral `#FF857A` once behind it. Start balance stays orchid — it is a reference, not a result.
-- **Nothing reflows.** The readouts occupy the same line box the text used; glyph height is driven by one media query (`26px` ≥`640px`, `22px` below).
-- **A screen reader never sees segments.** Each readout carries `aria-label="Current equity $11.370420 USDT, behind start balance"`, and every glyph is `aria-hidden`.
+- **Nothing reflows.** The readouts occupy the same line box the text used; glyph height is driven by one media query (`26px` ≥`640px`, `22px` below). The bloom is a static two-layer `drop-shadow`, not an animation.
+- **A screen reader never sees segments.** Each readout is `role="img"` with `aria-label="Current equity 11.851562 USDT, behind start balance"` (the exact `0.000000` figure, not the cents the odometer shows), and every glyph is `aria-hidden`.
 - **`prefers-reduced-motion` renders a static transform** instead of animating, and the slot LEDs stop pulsing.
 
-Open-trade slots carry their own signal: a slow `1.5s` mint pulse while the position is net-positive, a fast `0.8s` coral alarm while net-negative, driven by **net** PNL after fees — because a position that is gross-positive and net-negative is losing money. Trailing-stop arming keeps a separate orchid ring so "in profit" and "the predator is armed" are not the same light doing two jobs.
+Open-trade slots carry their own signal: a slow `1.5s` mint pulse while the position is net-positive, a fast `0.8s` coral alarm while net-negative, driven by **net** PNL after fees — because a position that is gross-positive and net-negative is losing money. Trailing-stop arming keeps a separate orchid ring so "in profit" and "the predator is armed" are not the same light doing two jobs. **Colour is never the only carrier**: the same state prints a `TrendingUp`/`TrendingDown` glyph and an `sr-only` "net profit" / "net loss" reading, so the row survives a colour-blind eye, a grayscale print, and a screen reader.
+
+Every panel — Vault Settings, AI Club, PNL Ledger, System Logs — is a real `role="dialog"` with `aria-modal`, focus moves into it on open, `Tab` is trapped inside it, `Escape` closes it, and focus returns to the switch that opened it. Close buttons are named ("Close the vault settings panel"), because an icon-only button announced as nothing is a button nobody can find twice.
 
 ### The Trellis (`PNL Ledger`)
 
@@ -713,9 +791,9 @@ Out of the box, **HFT** uses its built-in calibrated **System-1 RLCD Engine** (`
 | `POST /api/settings/credentials` | Encrypt & store `{ apiKey, apiSecret }` in AES-256-GCM vault and connect to Binance Portfolio Margin |
 | `POST /api/settings/reset-start-balance` | Reset & re-lock the fixed Start Balance to current live Binance wallet balance |
 | `POST /api/settings/rescan-ips` | Re-probe all server network interfaces and outbound public IPv4 addresses |
-| `POST /api/settings/bind-ip` | Pin outbound Binance HTTP/WS sockets to a specific local NIC IPv4 (`{ localAddress }`) |
-| `POST /api/settings/local-ai` | Switch System-1 runtime (`builtin`, `ollama_nimble`, `laya_http`, `kev_http`) |
-| `POST /api/settings/style-params` | Override the live self-mutated strategy parameter set (trailing floor/callback, protective stop, RSI bands, orderflow & AI-conviction minimums). Read current values from `snapshot.styleParams` |
+| `POST /api/settings/bind-ip` | Pin outbound Binance HTTP/WS sockets to a specific local NIC IPv4 (`{ localAddress }`), or `null` to clear. Anything that is not an IPv4 literal is refused with `400` — a typo here would make every signed request fail to leave the machine |
+| `POST /api/settings/local-ai` | Switch System-1 runtime (`builtin`, `ollama_nimble`, `laya_http`, `kev_http`). `endpointUrl` must resolve to `localhost`, `::1` or an IPv4 literal in `127/8`, `10/8`, `172.16–31` or `192.168/16`; credentials in the URL, query strings, fragments and non-`http(s)` schemes are refused. On refusal nothing is stored and the reasons come back as `{ rejected }` with `400` |
+| `POST /api/settings/style-params` | Override the live self-mutated strategy parameter set (trailing floor/callback, protective stop, RSI bands, orderflow & AI-conviction minimums, fee-hurdle multiple). Every key is range-bounded and non-finite values are dropped, then relationships are checked: `minLeverage > maxLeverage` discards both, a `trailingFloorRoiPct` above `trailingTriggerRoiPct` is discarded. Unknown keys are never written, so `{ apiKey, engineRunning }` cannot reach the vault. Returns `{ accepted, rejected }`; `400` only when nothing at all was accepted. Read current values from `snapshot.styleParams` |
 | `POST /api/settings/directives` | Bind a standing order the entry path must obey: `{ kind, symbol?, value?, reason? }`. Rejects an unknown `kind`, a non-`USDT` pair for `STAND_DOWN_SYMBOL`, and a missing threshold for the four numeric kinds (`400`). Read back from `snapshot.operatorDirectives` |
 | `POST /api/settings/directives/toggle` | Lift or re-activate a rule (`{ id, active }`) — a lifted rule is removed from the veto path, not just greyed out |
 | `POST /api/settings/notes` | Add an advisory briefing (`{ text }`) that is quoted into the agents on every entry. Read back from `snapshot.operatorNotes` |
@@ -724,7 +802,7 @@ Out of the box, **HFT** uses its built-in calibrated **System-1 RLCD Engine** (`
 | `GET /api/logs` | Query structured execution, API, AI, and error logs |
 | `GET /api/logs/export` | Download complete plain-text `.log` diagnostic file |
 | `POST /api/logs/clear` | Flush the in-memory log ring buffer |
-| `WS /ws` | Real-time push stream (`INIT`, 1-second `SNAPSHOT`, and instant `LOG` frames) |
+| `WS /ws` | Real-time push stream (`INIT`, coalesced `SNAPSHOT` frames at no more than one per `120ms`, instant `LOG` frames, plus app-level `PING`/`PONG` because browsers cannot observe WebSocket protocol pings). `INIT` always carries the full snapshot; later frames are **light** — the five heavy ledger blocks are omitted — whenever `snapshot.ledgerVersion` still matches what that client last saw. A client that stops reading is dropped rather than buffered |
 
 ### Reading `rateTelemetry` correctly
 
@@ -765,7 +843,7 @@ hft/
 │   │   ├── restMarketFeed.ts     # REST standby feed: 1s prices · 10s 24h · round-robin tape sweep + trade-ID dedup
 │   │   ├── marketScanner.ts      # Top-40 (20 Pos / 20 Neg) 24h USDT-M scanner + 95% pause logic
 │   │   ├── strategy15s.ts        # 15s Pullback + Bullish/Bearish Confirmation detector
-│   │   ├── positionMonitor1s.ts  # 1s Open Position check, Binance Fees, Net PNL, 5% ROI Trail & -9.5% Protective Stop
+│   │   ├── positionMonitor1s.ts  # 1s Open Position check, Binance Fees, Net PNL, 5% ROI Trail & -6% Protective Stop
 │   │   ├── incomeLedger.ts       # Settled exchange income: per-symbol funding vs account-wide commission
 │   │   ├── pnlLedger.ts          # Per-close ledger series & win/loss, fee and funding aggregates
 │   │   └── hftBotEngine.ts       # Master HFT orchestrator, transport failover & 10x→15x leverage ladder
@@ -773,6 +851,9 @@ hft/
 │       ├── cryptoVault.ts        # AES-256-GCM credential encryption at rest
 │       ├── format.ts             # 0.000000 formatting & exact LOT_SIZE step precision math
 │       ├── ipDiscovery.ts        # Multi-NIC & multi-egress IPv4 discovery engine
+│       ├── netGuard.ts           # Decision-endpoint SSRF allowlist: loopback & site-local IPv4 only
+│       ├── styleGuard.ts         # Bounds + relationship checks on every live trading parameter
+│       ├── streamFrame.ts        # Strips the five heavy ledger blocks from a light snapshot frame
 │       └── logger.ts             # Ring-buffer + daily file-persisted diagnostic logger
 ├── src/
 │   ├── App.tsx                   # Clean Lotus Garden luxury command console
@@ -790,9 +871,10 @@ hft/
 │   │   ├── SettingsVaultModal.tsx# API credentials vault, Multi-IPv4 whitelist & Start Balance reset
 │   │   └── SystemLogsDrawer.tsx  # Filterable & downloadable execution/error log console
 │   ├── hooks/
-│   │   └── useHftRealtime.ts     # WebSocket (/ws) + REST state synchronization hook
+│   │   ├── useHftRealtime.ts     # /ws + REST feed: PING-PONG liveness, watchdog, poll fallback, frame ordering
+│   │   └── useDialogA11y.ts      # Focus trap, Escape-to-close and focus restore for every panel
 │   └── utils/
-│       └── format.ts             # Strict 6-decimal UI formatters
+│       └── format.ts             # 6-decimal readouts + `fmtUsd2` cents for the odometer
 ├── scripts/
 │   ├── selfTest.ts               # Automated verification suite for strategy, trailing stop & AI Club
 │   ├── diagnoseApiKey.ts         # Vault decrypt health + live Spot/Futures/Portfolio Margin permission probe
@@ -808,6 +890,9 @@ hft/
 - All Binance outbound sockets enforce `family: 4` (IPv4) so requests deterministically match your whitelisted IPv4 address(es).
 - Diagnostic tooling and logs **never** emit full key material — only credential length, charset, and first/last 4 characters.
 - The API key requires **trading** permission only. **Withdrawal permission must never be enabled.**
+- **Every settings route validates before it stores.** `v1.5.0` closed the three that wrote straight into live trading parameters: style parameters are bounded and relationship-checked (`server/utils/styleGuard.ts`), the local-model endpoint only accepts a loop-address or RFC-1918 literal (`server/utils/netGuard.ts`, which is what closes the `169.254.169.254` credential-harvest path), and `bind-ip` is validated at the route *and* re-validated at boot so a bad address already in the vault is discarded instead of silently breaking every signed request.
+- **A damaged vault is quarantined, not deleted.** Persistence is debounced and a torn `hft_vault.json` falls back to the last good backup with the corrupt file moved aside — a truncated write can no longer erase the trade ledger or the keys.
+- **Stated plainly, because it is the one risk this release does not remove:** the server exposes **no authentication**. Any process that can reach the port can arm the engine and place real orders with the keys in the vault. `v1.5.0` hardened what those routes *accept*, deliberately without adding tokens that could lock you out of your own trading console mid-session. Run it on `127.0.0.1`, or put it behind a reverse proxy that terminates auth — see [§13](#13-production-deployment--online-vps--dedicated-server). Never expose `:3000` to a public interface.
 
 ---
 

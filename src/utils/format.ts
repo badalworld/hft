@@ -11,6 +11,18 @@ export function fmtSigned6(val: number | string | null | undefined): string {
   return `${sign}${n.toFixed(6)}`;
 }
 
+/**
+ * The odometer reads cents, not hundred-thousandths. A live equity changes below the fourth
+ * decimal every tick, and a display that rolls every second is noise rather than a reading.
+ * The exact 6-decimal figure stays as text beside it.
+ */
+export function fmtUsd2(val: number | string | null | undefined): string {
+  const n = typeof val === 'string' ? parseFloat(val) : Number(val ?? 0);
+  if (!Number.isFinite(n)) return '$0.00';
+  if (n < 0) return `-$${Math.abs(n).toFixed(2)}`;
+  return `$${n.toFixed(2)}`;
+}
+
 export function fmtUsd6(val: number | string | null | undefined): string {
   const n = typeof val === 'string' ? parseFloat(val) : Number(val ?? 0);
   if (!Number.isFinite(n)) return '$0.000000';

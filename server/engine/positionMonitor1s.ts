@@ -5,11 +5,30 @@ import type {
 import type { RawPositionRisk } from '../binance/restClient.js';
 import type { StateStore } from './stateStore.js';
 import { f6 } from '../utils/format.js';
+import { decideStop, type StopDecision, type StopKind } from '../utils/stops.js';
 import { logger } from '../utils/logger.js';
 
 export interface ExitTriggerSignal {
   position: OpenTradePosition;
   reason: string;
+}
+
+/** Emitted once per position when the level that must protect it moves. */
+export interface StopLevelChange {
+  position: OpenTradePosition;
+  kind: StopKind;
+  roiLevelPct: number;
+}
+
+export interface MonitorSyncResult {
+  exitsToExecute: ExitTriggerSignal[];
+  externallyClosedPositions: OpenTradePosition[];
+  stopLevelChanges: StopLevelChange[];
+}
+
+export interface MonitorTickResult {
+  exits: ExitTriggerSignal[];
+  stopLevelChanges: StopLevelChange[];
 }
 
 export class PositionMonitor1s {
@@ -19,6 +38,19 @@ export class PositionMonitor1s {
 
   private makeKey(symbol: string, positionSide: string): string {
     return `${symbol}:${positionSide}`;
+  }
+
+  private describeStop(
+    roiPct: number,
+    peakRoiPct: number,
+    decision: StopDecision,
+    guardRoiPct: number
+  ): string {
+    return decision.kind === 'TRAIL'
+      ? `TRAILING_STOP_HIT (ROI ${f6(roiPct)}% <= Trail ${f6(
+          decision.levelRoiPct
+        )}%, Peak +${f6(peakRoiPct)}%)`
+      : `PROTECTIVE_STOP_LOSS (ROI ${f6(roiPct)}% <= Guard ${f6(guardRoiPct)}%)`;
   }
 
   public getOpenPositionsList(): OpenTradePosition[] {
@@ -57,13 +89,11 @@ export class PositionMonitor1s {
     markPrices: (sym: string) => number | undefined,
     commissionLookup: (sym: string) => number,
     style: AdaptiveStyleParams
-  ): {
-    exitsToExecute: ExitTriggerSignal[];
-    externallyClosedPositions: OpenTradePosition[];
-  } {
+  ): MonitorSyncResult {
     const now = Date.now();
     const seenKeys = new Set<string>();
     const exitsToExecute: ExitTriggerSignal[] = [];
+    const stopLevelChanges: StopLevelChange[] = [];
 
     for (const r of rawRisks) {
       if (!r.positionAmt || Math.abs(r.positionAmt) <= 0 || r.entryPrice <= 0) {
@@ -110,8 +140,10 @@ export class PositionMonitor1s {
       );
 
       // Check 5.000000% ROI Trailing Stop Activation
+      let trailJustArmed = false;
       if (!trailingActive && roiPct >= style.trailingTriggerRoiPct) {
         trailingActive = true;
+        trailJustArmed = true;
         peakRoiPct = Math.max(peakRoiPct, roiPct);
         logger.success(
           'MONITOR_1S',
@@ -154,6 +186,10 @@ export class PositionMonitor1s {
         worstRoiPct,
         trailingStopRoiPct,
         protectiveStopRoiPct: style.protectiveStopRoiPct,
+        entryProtectiveStopRoiPct:
+          existing?.entryProtectiveStopRoiPct ??
+          persisted?.entryProtectiveStopRoiPct ??
+          style.protectiveStopRoiPct,
         lastCheckedAt: now,
         entryFeatures: existing?.entryFeatures ?? persisted?.entryFeatures,
       };
@@ -165,23 +201,29 @@ export class PositionMonitor1s {
         trailingActive,
         peakRoiPct,
         worstRoiPct,
+        entryProtectiveStopRoiPct: updatedPos.entryProtectiveStopRoiPct,
         entryFeatures: updatedPos.entryFeatures,
       });
 
-      // Evaluate exit triggers on 1-second check
-      if (trailingActive && trailingStopRoiPct !== null && roiPct <= trailingStopRoiPct) {
-        exitsToExecute.push({
+      // Evaluate exit triggers on 1-second check. The guard is evaluated on every
+      // branch — arming the trail must never retire the capital protection.
+      const decision = decideStop(
+        roiPct,
+        trailingActive,
+        trailingStopRoiPct,
+        style.protectiveStopRoiPct
+      );
+      if (trailJustArmed) {
+        stopLevelChanges.push({
           position: updatedPos,
-          reason: `TRAILING_STOP_HIT (ROI ${f6(roiPct)}% <= Trail ${f6(
-            trailingStopRoiPct
-          )}%, Peak +${f6(peakRoiPct)}%)`,
+          kind: decision.kind,
+          roiLevelPct: decision.levelRoiPct,
         });
-      } else if (!trailingActive && roiPct <= style.protectiveStopRoiPct) {
+      }
+      if (decision.triggered) {
         exitsToExecute.push({
           position: updatedPos,
-          reason: `PROTECTIVE_STOP_LOSS (ROI ${f6(roiPct)}% <= Guard ${f6(
-            style.protectiveStopRoiPct
-          )}%)`,
+          reason: this.describeStop(roiPct, peakRoiPct, decision, style.protectiveStopRoiPct),
         });
       }
     }
@@ -196,7 +238,7 @@ export class PositionMonitor1s {
       }
     }
 
-    return { exitsToExecute, externallyClosedPositions };
+    return { exitsToExecute, externallyClosedPositions, stopLevelChanges };
   }
 
   /**
@@ -205,9 +247,10 @@ export class PositionMonitor1s {
   public tickRealtimePrices(
     markLookup: (sym: string) => number | undefined,
     style: AdaptiveStyleParams
-  ): ExitTriggerSignal[] {
+  ): MonitorTickResult {
     const now = Date.now();
     const exits: ExitTriggerSignal[] = [];
+    const stopLevelChanges: StopLevelChange[] = [];
 
     for (const [key, pos] of this.openPositions.entries()) {
       const mp = markLookup(pos.symbol);
@@ -227,8 +270,10 @@ export class PositionMonitor1s {
         if (pos.roiPct > pos.peakRoiPct) pos.peakRoiPct = pos.roiPct;
         if (pos.roiPct < pos.worstRoiPct) pos.worstRoiPct = pos.roiPct;
 
+        let trailJustArmed = false;
         if (!pos.trailingActive && pos.roiPct >= style.trailingTriggerRoiPct) {
           pos.trailingActive = true;
+          trailJustArmed = true;
           logger.success(
             'MONITOR_1S',
             `🎯 ${pos.symbol} (${pos.side} ${pos.leverage}x) crossed +${f6(
@@ -244,20 +289,25 @@ export class PositionMonitor1s {
             style.trailingFloorRoiPct,
             pos.peakRoiPct - style.trailingCallbackRoiPct * dynamicTightener
           );
-          if (pos.roiPct <= pos.trailingStopRoiPct) {
-            exits.push({
-              position: pos,
-              reason: `TRAILING_STOP_HIT (ROI ${f6(pos.roiPct)}% <= Trail ${f6(
-                pos.trailingStopRoiPct
-              )}%, Peak +${f6(pos.peakRoiPct)}%)`,
-            });
-          }
-        } else if (pos.roiPct <= style.protectiveStopRoiPct) {
+        }
+
+        const decision = decideStop(
+          pos.roiPct,
+          pos.trailingActive,
+          pos.trailingStopRoiPct,
+          style.protectiveStopRoiPct
+        );
+        if (trailJustArmed) {
+          stopLevelChanges.push({
+            position: pos,
+            kind: decision.kind,
+            roiLevelPct: decision.levelRoiPct,
+          });
+        }
+        if (decision.triggered) {
           exits.push({
             position: pos,
-            reason: `PROTECTIVE_STOP_LOSS (ROI ${f6(pos.roiPct)}% <= Guard ${f6(
-              style.protectiveStopRoiPct
-            )}%)`,
+            reason: this.describeStop(pos.roiPct, pos.peakRoiPct, decision, style.protectiveStopRoiPct),
           });
         }
 
@@ -267,6 +317,7 @@ export class PositionMonitor1s {
           trailingActive: pos.trailingActive,
           peakRoiPct: pos.peakRoiPct,
           worstRoiPct: pos.worstRoiPct,
+          entryProtectiveStopRoiPct: pos.entryProtectiveStopRoiPct,
           entryFeatures: pos.entryFeatures,
         });
       }
@@ -274,7 +325,7 @@ export class PositionMonitor1s {
       pos.lastCheckedAt = now;
     }
 
-    return exits;
+    return { exits, stopLevelChanges };
   }
 
   public registerNewlyOpenedPosition(pos: OpenTradePosition) {
@@ -286,6 +337,7 @@ export class PositionMonitor1s {
       trailingActive: pos.trailingActive,
       peakRoiPct: pos.peakRoiPct,
       worstRoiPct: pos.worstRoiPct,
+      entryProtectiveStopRoiPct: pos.entryProtectiveStopRoiPct,
       entryFeatures: pos.entryFeatures,
     });
   }
