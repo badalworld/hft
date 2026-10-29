@@ -3,7 +3,7 @@
 
   <br />
 
-  [![Version](https://img.shields.io/badge/Version-1.6.0-6B403C?style=for-the-badge)](#whats-new-in-v160)
+  [![Version](https://img.shields.io/badge/Version-1.6.1-6B403C?style=for-the-badge)](#whats-new-in-v161)
   [![Exchange](https://img.shields.io/badge/Exchange-Binance%20Portfolio%20Margin%20(UM)-F0B90B?style=for-the-badge)](https://www.binance.com/en/futures)
   [![Execution](https://img.shields.io/badge/Execution-15s%20Candles%20%7C%201s%20Monitor-ADEBB3?style=for-the-badge)](#6-real-time-15-second-candle-engine--pullback-strategy)
   [![Transport](https://img.shields.io/badge/Transport-WebSocket%20%2B%20Auto%20REST%20Failover-8FD6FF?style=for-the-badge)](#4-market-data-transport-resilience-ws--rest-failover)
@@ -24,6 +24,14 @@
 > **Important Production Notice**: This system connects directly to **live production Binance** (not a simulation and not Testnet). Trades execute immediately once you save your Binance API Key & Secret Key in **Settings & IPs** and toggle **ARM ENGINE**.
 
 ---
+
+## What's New in `v1.6.1`
+
+**A confidence gate the model cannot reach is not a risk control; it is an outage.** By `2026-10-29T00:05Z` the live book had made `109` settled closes, the learner had spent them shrinking the System-1 feature weights and raising its temperature, and the council had spent them ratcheting `minAiConfidenceScore` from `0.522000` to `0.676000`. Nothing connected those two loops: at the live weights the highest probability the model could express was `0.641479`. The engine stayed armed and refused every entry for hours — `412` consecutive AI Club vetoes, best observed score `0.639993` — while the dashboard correctly reported that no setup qualified. It was not waiting for a better tape. It could not have approved one.
+
+`v1.6.1` makes the gate answer to the model that has to clear it. `attainableSystem1Score()` computes the sigmoid ceiling implied by the current weights and their structural feature caps; `resolveReachableThreshold()` holds the effective gate at `ceiling − 0.01` whenever the configured value crosses it, and every verdict states the clamp in its log line. The configured threshold remains the target — a reachable `0.620000` is untouched — and the override engages only where the value is physically unsatisfiable. A self-test pins the exact collapsed-weight case from this account and asserts that the best feature vector the model can express passes the held gate but can never exceed the ceiling.
+
+Restarting onto `v1.6.0` with the fixed gate produced the first fills in hours: `TAGUSDT` closed `+$0.102432` net on a trailing stop after peaking at `+8.605091%`, and `STARUSDT` closed `-$0.147418` net on the `-6.426735%` software guard. Two live defects were found in the same session and are recorded rather than hidden: the exchange-side `STOP_MARKET` arm is refused by papi with `-1116` because conditional orders live at `/papi/v1/um/conditional/order`, not `/papi/v1/um/order` ([§8](#8-1-second-open-position-monitor--5-roi-trailing-stop)); and the order-flow tape rides the `aggTrade` socket, which delivers no frames on this network, so every shadow verdict reads `NO_SIGNAL` while the REST fallback feeds candles only ([§4](#4-market-data-transport-resilience-ws--rest-failover)).
 
 ## What's New in `v1.6.0`
 
@@ -99,7 +107,7 @@ The refusals are the interesting half. On `BLESSUSDT` every seat voted `FOR` a t
 
 One honest artefact: those two trailing-floor ballots show **two votes, not three**, because the process serving this account predates the three-seat fix from `v1.5.0` (Hermes owned the parameter and also occupied a seat, collapsing the panel). The code in this repository seats three independent agents, and the self-test now pins that property for all three trailing parameters. It takes effect on the next backend restart.
 
-> **Verification status, stated separately.** `tsc` is clean, `vite build` succeeds, and the self-test suite passes all **11 groups**, including the new order-flow group: quote-denominated CVD and slope from real bucket math, distance-weighted OBI symmetry on mirrored books, touch-refill ratios, all nine verdicts (`NO_DATA` on a missing and a stale book, `NO_SIGNAL` on a thin tape, `EXECUTION_REJECT` on cost, `OBI_REJECT`, `CVD_REJECT`, `RATIO_REJECT`, `PRICE_REJECT`, `ABSORPTION_REJECT` on both sides), `shadow` as the default and `enforce` surviving a store reload, plus council approval of a one-step OBI tightening, refusal of an over-step, and the inverted absorption polarity. The readout was driven in a browser against the live account, served by the running backend itself on port `3000` (the HTML carries `/@vite/client`, so the current frontend source is already what the browser receives): the font loaded (`document.fonts.check('700 22px "DSEG7 Classic"') === true`), both readouts measured `79 × 22px` at a `600px` viewport with the correct `aria-label`s, and the AI Club opened with the ballot record above. That check also caught a real rollout bug — the new scanner read `undefined.toFixed()` from the old backend's missing fields and blanked the page — which is fixed by type guards that render `—`. **The backend has not been restarted**, so the depth subscription and the order-flow gate are not yet executing live; the DSEG7 panel, by contrast, is already live, because `npm run dev` serves the client through Vite's dev middleware rather than from a stale bundle. The book is flat, so the restart is safe whenever you choose to take it. The CodeRabbit CLI is not installed on this machine; the audit was performed with reviewer agents plus static verification and line-by-line reads. Nothing has been pushed.
+> **Verification status, stated separately.** `tsc` is clean, `vite build` succeeds, and the self-test suite passes all **11 groups**, including the new order-flow group: quote-denominated CVD and slope from real bucket math, distance-weighted OBI symmetry on mirrored books, touch-refill ratios, all nine verdicts (`NO_DATA` on a missing and a stale book, `NO_SIGNAL` on a thin tape, `EXECUTION_REJECT` on cost, `OBI_REJECT`, `CVD_REJECT`, `RATIO_REJECT`, `PRICE_REJECT`, `ABSORPTION_REJECT` on both sides), `shadow` as the default and `enforce` surviving a store reload, plus council approval of a one-step OBI tightening, refusal of an over-step, and the inverted absorption polarity. The readout was driven in a browser against the live account, served by the running backend itself on port `3000` (the HTML carries `/@vite/client`, so the current frontend source is already what the browser receives): the font loaded (`document.fonts.check('700 22px "DSEG7 Classic"') === true`), both readouts measured `79 × 22px` at a `600px` viewport with the correct `aria-label`s, and the AI Club opened with the ballot record above. That check also caught a real rollout bug — the new scanner read `undefined.toFixed()` from the old backend's missing fields and blanked the page — which is fixed by type guards that render `—`. **The backend was restarted onto `v1.6.0` at `04:08Z`**, after this paragraph was first written: the depth socket is live (`43` fresh books) and the order-flow layer is scoring in `shadow`, while the DSEG7 panel was already live because `npm run dev` serves the client through Vite's dev middleware rather than from a stale bundle. `v1.6.1` is the reachability fix on top of that restart. The CodeRabbit CLI is not installed on this machine; the audit was performed with reviewer agents plus static verification and line-by-line reads.
 
 <details>
 <summary><b>What's New in <code>v1.5.0</code> — the arithmetic fix, the audit, and a dashboard that cannot lie about liveness</b></summary>
@@ -431,6 +439,8 @@ Total ≈ **`1,160 / 2,400` (48%)** of the `FAPI` budget while fully engaged. Me
 
 The REST tape is **price-accurate but volume-sparse** relative to a live `aggTrade` stream. Under sustained fallback, orderflow conviction readings skew toward their clamp ceiling — one verified entry recorded `orderflowDeltaRatio: 9.999999`. The strategy remains valid; its aggressor-conviction gate is simply looser than it is on the WebSocket path. **On an unblocked network the WS feed wins and REST never engages at all.** Treat fallback as *"keeps trading correct on price"*, not *"identical tape fidelity"*.
 
+The `v1.6.0` order-flow layer reads its tape from the `aggTrade` socket only. On a network where that socket is silent while REST stays healthy — the case measured here — candles keep building from the REST feed but the flow tracker's window stays empty, so every shadow verdict honestly reports `NO_SIGNAL` instead of inventing volume; in `enforce` that would refuse every entry. Feeding the REST tape into the same tracker is the next transport fix.
+
 ### Diagnosing your own transport
 
 ```bash
@@ -581,7 +591,7 @@ TRAILING_STOP_HIT (ROI 4.053556% <= Trail 4.260723%, Peak +5.410723%)
 PROTECTIVE_STOP_LOSS (ROI -12.090464% <= Guard -9.500000%)
 ```
 
-The second line is the honest caveat: the guard fires the instant the poll sees the breach, but on a thin perpetual the fill lands past the level. Treat the guard as a *trigger*, not a guaranteed loss ceiling — which is exactly why `v1.5.0` also parks a `STOP_MARKET` on the exchange itself.
+The second line is the honest caveat: the guard fires the instant the poll sees the breach, but on a thin perpetual the fill lands past the level. Treat the guard as a *trigger*, not a guaranteed loss ceiling. `v1.5.0` also attempts to park a `STOP_MARKET` on the exchange itself; on Portfolio Margin that arm is refused with `-1116 Invalid orderType` because conditional orders live at `/papi/v1/um/conditional/order`, not `/papi/v1/um/order`. Until that migration lands, the 1-second guard is the enforced exit and each failed arm is logged under `EXCHANGE_STOP` rather than assumed to have succeeded.
 
 ---
 

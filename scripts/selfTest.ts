@@ -26,7 +26,11 @@ import {
 } from '../server/ai/improvementCouncil.js';
 import { diagnoseLoss } from '../server/ai/lossAutopsy.js';
 import { buildTradeLesson } from '../server/ai/lessonMemory.js';
-import { createDefaultSystem1Weights } from '../server/ai/system1Primitives.js';
+import {
+  attainableSystem1Score,
+  createDefaultSystem1Weights,
+  resolveReachableThreshold,
+} from '../server/ai/system1Primitives.js';
 import { MarketScanner40 } from '../server/engine/marketScanner.js';
 import { OrderBookTracker } from '../server/engine/orderBookTracker.js';
 import { OrderFlowTracker } from '../server/engine/orderFlowTracker.js';
@@ -162,6 +166,71 @@ async function runSelfTests() {
     });
     assert.equal(entryDecision.approved, true);
     assert.ok(entryDecision.confidence >= style.minAiConfidenceScore);
+
+    // The gate must stay reachable. After 109 RLCD updates the live weights had shrunk
+    // enough that the council's 0.676 threshold sat above the model's absolute ceiling,
+    // filtering 100% of signals for hours. A threshold the weights cannot reach is an
+    // outage, not a risk control, so the judge holds it one point below the ceiling.
+    const collapsedWeights = {
+      ...createDefaultSystem1Weights(),
+      bias: -0.22210403415365307,
+      rsiAlignment: 0.370149584551097,
+      pullbackQuality: 0.10689387766653743,
+      orderflowDelta: 0.15,
+      candleConviction: 0.14426368656404448,
+      wickRejection: 0.17203045305969922,
+      momentum24hSweetSpot: 0.05,
+      volatilityHealth: 0.05,
+      temperature: 1.36,
+    };
+    const liveCeiling = attainableSystem1Score(collapsedWeights);
+    assert.ok(liveCeiling < 0.676, 'collapsed weights must sit below the council threshold');
+    const reachable = resolveReachableThreshold(0.676, collapsedWeights);
+    assert.equal(reachable.clamped, true, 'an unreachable threshold must be clamped');
+    assert.ok(
+      reachable.threshold < 0.676,
+      'the clamped gate must sit below the configured threshold'
+    );
+    assert.ok(reachable.threshold < liveCeiling, 'the clamped gate must remain attainable');
+    const untouchedGate = resolveReachableThreshold(0.56, createDefaultSystem1Weights());
+    assert.equal(untouchedGate.clamped, false, 'a reachable threshold must be left untouched');
+
+    const lockedClub = new AiAgentClubOrchestrator({
+      styleParams: { ...style, minAiConfidenceScore: 0.676 },
+      system1Weights: collapsedWeights,
+      localConfig: {
+        provider: 'builtin',
+        endpointUrl: 'http://127.0.0.1:11434',
+        modelName: 'nimble',
+        lastLatencyMs: 0,
+        lastStatus: 'Ready',
+      },
+    });
+    const ceilingTrade = await lockedClub.evaluateEntryCandidate({
+      symbol: 'CEILUSDT',
+      side: 'LONG',
+      features: {
+        ...stratEval.features,
+        rsi15s: 44,
+        pullbackDepthPct: 0.5,
+        orderflowDeltaRatio: 2.0,
+        candleBodyRatio: 0.9,
+        wickRejectionRatio: 0.6,
+        absChange24hPct: 20,
+        volatilityAtrPct: 0.4,
+        aiConfidence: 0,
+      },
+      minNotional: 5,
+    });
+    assert.equal(
+      ceilingTrade.approved,
+      true,
+      'the best setup the model can express must pass the reachability-clamped gate'
+    );
+    assert.ok(
+      ceilingTrade.confidence <= liveCeiling + 1e-9,
+      'a calibrated score can never exceed the model ceiling'
+    );
 
     // Simulate a Premature Pullback Loss and verify AI Club evolves trading style parameters
     const beforeDeltaMin = club.getStyleParams().minOrderflowDeltaRatio;

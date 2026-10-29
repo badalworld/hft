@@ -14,7 +14,7 @@ import type {
   System1Weights,
   TradeLesson,
 } from '../types.js';
-import { System1DecisionEngine } from './system1Primitives.js';
+import { System1DecisionEngine, resolveReachableThreshold } from './system1Primitives.js';
 import {
   aggregateLessonPatterns,
   buildTradeLesson,
@@ -349,9 +349,20 @@ export class AiAgentClubOrchestrator {
         });
 
         // Shared memory nudges the probability, then the gate is re-applied so a
-        // historically losing setup genuinely has to clear a higher bar.
+        // historically losing setup genuinely has to clear a higher bar. The bar itself
+        // is held below the model's attainable ceiling: a threshold the weights can no
+        // longer reach would filter 100% of signals forever, which is an outage, not risk.
         const adjusted = clamp(decision.calibratedScore + state.confidenceDelta, 0, 1);
-        const approved = adjusted >= this.styleParams.minAiConfidenceScore;
+        const gate = resolveReachableThreshold(
+          this.styleParams.minAiConfidenceScore,
+          this.system1Weights
+        );
+        const approved = adjusted >= gate.threshold;
+        const clampNote = gate.clamped
+          ? ` — configured ${f6(this.styleParams.minAiConfidenceScore)} exceeds the model ceiling ${f6(
+              gate.ceiling
+            )}; gate held at ${f6(gate.threshold)}`
+          : '';
 
         this.touchAgent(
           'system1-judge',
@@ -359,7 +370,7 @@ export class AiAgentClubOrchestrator {
               state.confidenceDelta !== 0
                 ? ` ${state.confidenceDelta > 0 ? '+' : ''}${f6(state.confidenceDelta)} memory -> ${f6(adjusted)}`
                 : ''
-            } (${decision.choiceAction}) in ${decision.latencyMs.toFixed(2)}ms`
+            } (${decision.choiceAction}) in ${decision.latencyMs.toFixed(2)}ms${clampNote}`
         );
 
         return {
@@ -369,10 +380,8 @@ export class AiAgentClubOrchestrator {
           vetoReason: approved
             ? ''
             : state.confidenceDelta < 0
-              ? `Shared memory veto: ${state.lessonGuidance}`
-              : `System-1 score ${f6(adjusted)} < threshold ${f6(
-                  this.styleParams.minAiConfidenceScore
-                )}`,
+              ? `Shared memory veto: ${state.lessonGuidance}${clampNote}`
+              : `System-1 score ${f6(adjusted)} < threshold ${f6(gate.threshold)}${clampNote}`,
         };
       })
       .addNode('leverageArchitect', async (state) => {
@@ -388,6 +397,10 @@ export class AiAgentClubOrchestrator {
           Math.round(this.styleParams.minLeverage),
           Math.round(this.styleParams.maxLeverage)
         );
+        const gate = resolveReachableThreshold(
+          this.styleParams.minAiConfidenceScore,
+          this.system1Weights
+        );
         this.touchAgent(
           'leverage-architect',
           `${state.symbol}: Approved $${f6(this.styleParams.baseMarginUsd)} margin | Ladder ${startLev}x→${
@@ -397,8 +410,8 @@ export class AiAgentClubOrchestrator {
         return {
           recommendedStartLeverage: startLev,
           summaryNote: `AI Club Consensus PASS (score=${f6(state.aiConfidence)}, start ${startLev}x)${
-            state.operatorBriefing ? ` — briefed: ${state.operatorBriefing}` : ''
-          }`,
+            gate.clamped ? ` [gate held at ${f6(gate.threshold)}: configured threshold is above the model ceiling]` : ''
+          }${state.operatorBriefing ? ` — briefed: ${state.operatorBriefing}` : ''}`,
         };
       })
       .addEdge(START, 'sharedMemoryRecall')

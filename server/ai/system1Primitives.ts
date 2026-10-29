@@ -87,6 +87,51 @@ function normalizeFeatures(
   return { xRsi, xPullback, xDelta, xBody, xWick, xMom24h, xVol };
 }
 
+// Structural maxima of normalizeFeatures(): momentum tops out at 0.75 and volatility
+// at 0.65, the other five at 1. Any gate above the score this ceiling implies can never
+// be met, no matter how perfect the tape is.
+const FEATURE_CAPS = {
+  rsi: 1,
+  pullback: 1,
+  delta: 1,
+  body: 1,
+  wick: 1,
+  mom24h: 0.75,
+  vol: 0.65,
+} as const;
+
+/** The highest probability the current weights and temperature can ever output. */
+export function attainableSystem1Score(weights: System1Weights): number {
+  const maxLogit =
+    weights.bias +
+    weights.rsiAlignment * FEATURE_CAPS.rsi +
+    weights.pullbackQuality * FEATURE_CAPS.pullback +
+    weights.orderflowDelta * FEATURE_CAPS.delta +
+    weights.candleConviction * FEATURE_CAPS.body +
+    weights.wickRejection * FEATURE_CAPS.wick +
+    weights.momentum24hSweetSpot * FEATURE_CAPS.mom24h +
+    weights.volatilityHealth * FEATURE_CAPS.vol;
+  return sigmoid(maxLogit / clamp(weights.temperature, 0.5, 2.5));
+}
+
+/**
+ * A threshold above the model's attainable ceiling is not a risk control, it is an
+ * outage: the learner shrinks feature weights and raises temperature after losses while
+ * the council ratchets the threshold up, so without this coupling the two loops can
+ * cross and freeze every entry. The configured value stays authoritative until it
+ * becomes physically unreachable; then it is held one point below the ceiling.
+ */
+export function resolveReachableThreshold(
+  configured: number,
+  weights: System1Weights
+): { threshold: number; ceiling: number; clamped: boolean } {
+  const ceiling = attainableSystem1Score(weights);
+  const reachable = Math.max(0, ceiling - 0.01);
+  return configured > reachable
+    ? { threshold: reachable, ceiling, clamped: true }
+    : { threshold: configured, ceiling, clamped: false };
+}
+
 export class System1DecisionEngine {
   private contrastiveFile = path.resolve(
     process.cwd(),
