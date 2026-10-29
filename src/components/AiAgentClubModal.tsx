@@ -996,6 +996,11 @@ export const AiAgentClubModal: React.FC<AiAgentClubModalProps> = ({
                       label: 'Local Kev System-One Server (kev-0.8b/4b)',
                       badge: 'FREE',
                     },
+                    {
+                      value: 'threerouter',
+                      label: 'ThreeRouter Cloud AI Gateway (DeepSeek / Qwen / GLM)',
+                      badge: 'ROUTER',
+                    },
                   ]}
                 />
               </div>
